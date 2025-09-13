@@ -1,3 +1,5 @@
+-- client.lua (full, minus generatePerson())
+
 local stopEnabled, debugEnabled = true, true
 local pedData, lastPedNetId = {}, nil
 local lastPedEntity = nil          
@@ -1893,7 +1895,7 @@ end
 
 if lib and lib.registerContext then
   lib.registerContext({
-    id='police_main',
+    id='police_mainai',
     title='**Police Actions**',
     canClose=true,
     options={
@@ -1908,7 +1910,7 @@ if lib and lib.registerContext then
   lib.registerContext({
     id='police_mdt',
     title='🔎 MDT',
-    menu='police_main',
+    menu='police_mainai',
     canClose=true,
     options={
       { title='Plate Lookup', icon='search', onSelect=runPlate },
@@ -1925,7 +1927,7 @@ if lib and lib.registerContext then
   lib.registerContext({
     id='police_ai',
     title='🤖 AI Services',
-    menu='police_main',
+    menu='police_mainai',
     canClose=true,
     options={
       { title='AI EMS', icon='heartbeat', onSelect=callAIEMS },
@@ -1938,7 +1940,7 @@ if lib and lib.registerContext then
   lib.registerContext({
     id='police_ped',
     title='👮 Ped Interaction',
-    menu='police_main',
+    menu='police_mainai',
     canClose=true,
     options={
       { title='Check ID', icon='id-card', onSelect=function() dprint("Context: Check ID selected"); showIDSafely(lastPedNetId) end },
@@ -1961,7 +1963,7 @@ if lib and lib.registerContext then
   lib.registerContext({
     id='vehicle_interact',
     title='🚗 Vehicle Interaction',
-    menu='police_main',
+    menu='police_mainai',
     canClose=true,
     options={
 { title='Finish Pull-Over', icon='car', description='Let AI car go', onSelect=function()
@@ -2322,8 +2324,8 @@ end)
 
 RegisterCommand('toggleMDT', toggleMDT)
 RegisterKeyMapping('toggleMDT','Open/Close MDT','keyboard','B')
-RegisterCommand('policemenu', function() if lib and lib.showContext then lib.showContext('police_main') else dprint("policemenu: lib.showContext missing") end end)
-RegisterKeyMapping('policemenu','Open Police Actions','keyboard','F5')
+RegisterCommand('aipolicemenu', function() if lib and lib.showContext then lib.showContext('police_mainai') else dprint("policemenu: lib.showContext missing") end end)
+RegisterKeyMapping('aipolicemenu','Open Police Actions','keyboard','F6')
 
 -- STOP / TRAFFIC STOP (require LEFT SHIFT + E)
 RegisterCommand('stopAI', function()
@@ -2785,7 +2787,7 @@ end
 -- client event that opens the police menu context
 RegisterNetEvent('az-police:openMenu', function()
     if lib and lib.showContext then
-        lib.showContext('police_main')
+        lib.showContext('police_mainai')
     else
         print("^1[az-police]^7 lib.showContext missing")
     end
@@ -2794,7 +2796,7 @@ end)
 -- preserve your command
 RegisterCommand('policemenu', function()
     if lib and lib.showContext then
-        lib.showContext('police_main')
+        lib.showContext('police_mainai')
     else
         print("^1[policemenu]^7 lib.showContext missing")
     end
