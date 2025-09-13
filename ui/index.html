@@ -1,0 +1,1170 @@
+<!DOCTYPE html> 
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta
+    http-equiv="Content-Security-Policy"
+    content="
+      default-src 'self';
+      script-src  'self' 'unsafe-inline';
+      style-src   'self' 'unsafe-inline';
+      img-src     'self' data:;
+      connect-src 'self' https://*;
+    "
+  />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>NCIC MDT - Police Terminal</title>
+
+  <style>
+    :root {
+      --bg: #0a1a25;              /* screen background */
+      --panel: #132736;           /* panels */
+      --glass: rgba(255,255,255,0.05);
+      --accent: #00ff8c;          /* neon MDT green */
+      --accent-dim: rgba(0,255,140,0.15);
+      --accent-glow: 0 0 10px rgba(0,255,140,0.3);
+      --muted: #8fb4b0;
+      --text: #d9f2ea;
+      --danger: #ff6b6b;
+      --warning: #ffc107;
+      --border: rgba(0,255,140,0.2);
+      --header-height: 70px;
+      --nav-width: 180px;
+    }
+
+    /* reset */
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: "Montserrat", "Arial", sans-serif;
+    }
+    
+    html, body {
+      height: 100%;
+      background: transparent;
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    
+    /* app container */
+    #app {
+      display: none; /* <-- keep hidden by default; .open will show it */
+      position: absolute;
+      left: 50%;
+      top: 5%;
+      transform: translateX(-50%);
+      width: 900px;
+      height: 700px;
+      border-radius: 8px;
+      background: var(--bg);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6), 
+                  inset 0 1px 0 rgba(255,255,255,0.05),
+                  0 0 0 1px rgba(0,255,140,0.1);
+      overflow: hidden;
+      z-index: 9999;
+      flex-direction: column;
+      user-select: none;
+      touch-action: none;
+      min-width: 480px;
+      min-height: 340px;
+      direction: ltr; /* prevents mirroring issues for the grip */
+    }
+    
+    #app.open {
+      display: flex; 
+      animation: mdtIn 0.3s ease-out;
+    }
+
+    /* top chrome / header */
+    header {
+      display: flex;
+      align-items: center;
+      height: var(--header-height);
+      padding: 0 20px;
+      background: rgba(0, 0, 0, 0.3);
+      border-bottom: 1px solid var(--border);
+      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+      cursor: grab;
+    }
+    header:active { cursor: grabbing; }
+
+    .brand { display:flex; align-items:center; gap:15px; }
+    .badge-icon {
+      width: 45px; height:45px; border-radius:6px;
+      background: linear-gradient(145deg,#012a3a,#003249);
+      display:flex; align-items:center; justify-content:center;
+      font-weight:900;color:var(--accent);font-size:14px;
+      border:1px solid rgba(255,255,255,0.05);
+      box-shadow: var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.05);
+    }
+    h1 { font-size:18px; letter-spacing:1px; color:var(--accent); text-transform:uppercase; font-weight:700; text-shadow:0 0 5px rgba(0,255,140,0.3) }
+    .sub { font-size:12px; color:var(--muted); margin-top:2px; letter-spacing:0.8px; }
+
+    .header-status { margin-left:auto; display:flex; align-items:center; gap:20px; color:var(--muted); font-size:13px; }
+    .dot { width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px rgba(0,255,140,0.4); }
+    .header-status .field { display:flex; flex-direction:column; align-items:flex-end; }
+    .header-status .label { font-size:11px;color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:2px; }
+    .header-status .value { font-size:14px; color:var(--text); font-weight:700; }
+
+    /* close */
+    .close-btn {
+      margin-left: 15px;
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 20px;
+      cursor: pointer;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .close-btn:hover { background: rgba(255,107,107,0.1); color: var(--danger); }
+
+    /* layout */
+    .content { flex: 1; display: grid; grid-template-columns: var(--nav-width) 1fr; gap:0; min-height:0; }
+
+    /* nav */
+    nav { background: rgba(0,0,0,0.2); border-right:1px solid var(--border); padding:20px 0; display:flex; flex-direction:column; gap:5px; }
+    nav button {
+      appearance:none; text-align:left; padding:14px 20px; background:transparent;
+      color:var(--muted); border:none; border-left:4px solid transparent; cursor:pointer;
+      font-size:14px; text-transform:uppercase; letter-spacing:0.8px; font-weight:600;
+      display:flex; align-items:center; gap:12px; transition:all 0.15s ease; width:100%;
+    }
+    nav button .kbd { font-size:11px; color:rgba(255,255,255,0.2); margin-left:auto; padding:3px 6px; border-radius:3px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.05); }
+    nav button:hover { background: rgba(0,255,140,0.08); color: var(--accent); }
+    nav button.active { background: rgba(0,255,140,0.12); color:var(--accent); border-left-color:var(--accent); }
+
+    /* main area */
+    .pane { display:flex; flex-direction:column; gap:0; min-height:0; background: rgba(0,0,0,0.15); }
+    .controls { display:grid; grid-template-columns:1fr 1fr; gap:15px; background:var(--panel); padding:20px; border-bottom:1px solid var(--border); }
+    .form-group { display:flex; flex-direction:column; gap:8px; }
+    label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px; font-weight:600; }
+    input[type="text"], select, textarea {
+      background: rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.08);
+      padding:12px; border-radius:4px; color:var(--text); font-size:14px; outline:none; transition:all .2s;
+    }
+    textarea { min-height:90px; resize:vertical; }
+    input[type="text"]::placeholder { color: rgba(191,238,224,0.3); }
+    input[type="text"]:focus, select:focus, textarea:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(0,255,140,0.2); }
+    .controls .wide { grid-column:1 / -1; }
+    .btn { background: rgba(0,0,0,0.3); border:1px solid var(--accent); color:var(--accent); padding:12px; border-radius:4px; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; cursor:pointer; width:100%; transition:all .2s; font-size:13px; }
+    .btn:hover { background: rgba(0,255,140,0.1); box-shadow: var(--accent-glow); }
+
+    .results { flex:1; display:flex; flex-direction:column; overflow:hidden; background: rgba(0,0,0,0.1); }
+    .results-header { display:flex; align-items:center; justify-content:space-between; padding:15px 20px; background: rgba(0,0,0,0.2); border-bottom:1px solid var(--border); }
+    .results-title { color:var(--accent); font-weight:700; letter-spacing:1px; font-size:16px; }
+    .status { font-weight:700; text-transform:uppercase; letter-spacing:0.8px; font-size:13px; padding:5px 10px; border-radius:4px; background: rgba(0,0,0,0.3); }
+
+    .record-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:15px; padding:15px; border-bottom:1px solid rgba(255,255,255,0.05); font-size:14px; color:var(--text); }
+    .record-grid.header { background: rgba(0,255,140,0.05); font-weight:700; color:var(--accent); border-bottom:1px solid var(--border); }
+    .record { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:15px; border-bottom:1px solid rgba(255,255,255,0.05); align-items:center; font-size:14px; transition:background .2s; }
+    .record:hover { background: rgba(255,255,255,0.03); }
+    .record-field { display:flex; flex-direction:column; }
+    .record-label { font-size:12px; color:var(--muted); text-transform:uppercase; margin-bottom:4px; font-weight:600; }
+    .record-value { font-weight:600; color:var(--text); }
+    .no-results { padding:40px; text-align:center; color:var(--muted); font-style:italic; }
+
+    .scroll { overflow:auto; padding:10px; -webkit-overflow-scrolling:touch; min-height:0; flex:1; }
+    .tiny-btn { padding:8px 12px; border-radius:4px; border:1px solid rgba(255,255,255,0.1); background:rgba(0,0,0,0.3); color:var(--muted); cursor:pointer; font-size:12px; transition:all .2s; }
+    .tiny-btn:hover { color:var(--accent); border-color:var(--accent); background:rgba(0,255,140,0.1); }
+
+    .panel { display:flex; flex-direction:column; height:100%; min-height:0; }
+    #reports-list,#warrants-list,#dispatch-list,#plate-status,#id-results { flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch; }
+
+    .panel-form { padding:15px 20px; background: rgba(0,0,0,0.15); border-bottom:1px solid var(--border); }
+    .form-row { display:flex; gap:15px; margin-bottom:15px; }
+    .form-row:last-child { margin-bottom:0; }
+    .form-row .form-group { flex:1; }
+
+    @keyframes mdtIn { from { opacity:0; transform:translateX(-50%) translateY(-10px);} to { opacity:1; transform:translateX(-50%) translateY(0);} }
+
+    .status.valid, .status.active, .status.clear { color:var(--accent); background:rgba(0,255,140,0.1); border:1px solid rgba(0,255,140,0.2); }
+    .status.stolen, .status.wanted, .status.suspended { color:var(--danger); background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.2); }
+    .status.expired, .status.pending { color:var(--warning); background:rgba(255,193,7,0.1); border:1px solid rgba(255,193,7,0.2); }
+
+    /* Resize grip (bottom-right inside #app) */
+    .resize-grip {
+      position: absolute;
+      right: 10px;
+      bottom: 10px;
+      width: 22px;
+      height: 22px;
+      cursor: nwse-resize;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      z-index: 10001;
+      pointer-events: auto;
+    }
+    .resize-grip .bars { width:14px; height:14px; position:relative; }
+    .resize-grip .bars::before, .resize-grip .bars::after, .resize-grip .bars div {
+      content:""; position:absolute; right:0; bottom:0; width:10px; height:2px; background: rgba(191,238,224,0.18); transform: rotate(-45deg); border-radius:2px;
+    }
+    .resize-grip .bars::after { bottom:6px; width:7px; opacity:0.8; }
+    .resize-grip .bars div { bottom:11px; width:4px; opacity:0.6; }
+
+    /* tooltip (uses data-tooltip attribute) */
+    [data-tooltip] { position: relative; }
+    [data-tooltip]::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      white-space: nowrap;
+      font-size: 12px;
+      padding: 6px 8px;
+      border-radius: 4px;
+      background: rgba(2,8,10,0.96);
+      color: var(--text);
+      top: calc(100% + 8px);
+      left: 50%;
+      transform: translateX(-50%) translateY(6px);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .12s ease, transform .12s ease;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.6);
+      z-index: 10002;
+      border: 1px solid rgba(255,255,255,0.03);
+    }
+    [data-tooltip]:hover::after { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+    /* accessibility focus for grip */
+    .resize-grip:focus { outline: none; box-shadow: 0 0 0 3px rgba(0,255,140,0.12); border-radius: 4px; }
+
+    /* responsive adjustments */
+    @media (max-width: 950px) {
+      #app { left:50%; transform:translateX(-50%); width:95%; height:85vh; }
+      .content { grid-template-columns: 160px 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app" role="application" aria-label="NCIC MDT">
+    <header id="app-header" data-tooltip="Drag to move — double click to center">
+      <div class="brand" style="min-width:220px">
+        <div class="badge-icon">LSPD</div>
+        <div>
+          <h1>NCIC — Mobile Data Terminal</h1>
+          <div class="sub">In-car terminal · Tactical access</div>
+        </div>
+      </div>
+
+      <div class="header-status" aria-hidden="false">
+        <div style="display:flex;align-items:center;gap:10px">
+          <div class="dot" title="Connection"></div>
+          <div class="small muted">ONLINE</div>
+        </div>
+
+        <div class="field">
+          <div class="label">Unit</div>
+          <div class="value">1-L-12</div>
+        </div>
+
+        <div class="field">
+          <div class="label">Officer</div>
+          <div class="value">#3467</div>
+        </div>
+
+        <button class="close-btn" id="btn-close" aria-label="Close MDT" data-tooltip="Close MDT (Esc)">✖</button>
+      </div>
+    </header>
+
+    <div class="content">
+      <!-- NAV -->
+      <nav aria-label="MDT navigation">
+        <button data-tab="plate" class="active" data-tooltip="Search vehicle plates (F1)">Plate Search <span class="kbd">F1</span></button>
+        <button data-tab="id" data-tooltip="Search identities (F2)">ID Search <span class="kbd">F2</span></button>
+        <button data-tab="reports" data-tooltip="Reports & incident logging (F3)">Reports <span class="kbd">F3</span></button>
+        <button data-tab="warrants" data-tooltip="Manage warrants (F4)">Warrants <span class="kbd">F4</span></button>
+        <button data-tab="dispatch" data-tooltip="Dispatch and active calls (F5)">Dispatch <span class="kbd">F5</span></button>
+      </nav>
+
+      <!-- MAIN PANE -->
+      <div class="pane">
+        <!-- controls -->
+        <div class="controls" aria-hidden="false">
+          <div class="form-group">
+            <label for="plate-history">Search History</label>
+            <select id="plate-history" aria-label="Plate search history" data-tooltip="Recent plate searches">
+              <option value="">-- Select previous search --</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label for="id-history">ID History</label>
+            <select id="id-history" aria-label="ID search history" data-tooltip="Recent ID lookups">
+              <option value="">-- Select previous search --</option>
+            </select>
+          </div>
+
+          <div class="form-group wide">
+            <label for="plate-input">License Plate #</label>
+            <input id="plate-input" type="text" placeholder="Enter plate number or scan vehicle" autocomplete="off" data-tooltip="Enter license plate, then Run Plate Search" />
+          </div>
+
+          <div class="form-group wide">
+            <label for="id-input">First / LastName</label>
+            <input id="id-input" type="text" placeholder="Enter partial or full name here" autocomplete="off" data-tooltip="NetID or 'First Last' names accepted" />
+          </div>
+
+          <div style="grid-column:1/3;display:flex;gap:10px">
+            <button id="btn-plate" class="btn" data-tooltip="Lookup plate">Run Plate Search</button>
+            <button id="btn-id" class="btn" data-tooltip="Lookup ID">Run ID Search</button>
+          </div>
+        </div>
+
+        <!-- results -->
+        <div class="results" role="region" aria-label="Results">
+          <!-- Plate panel -->
+          <section id="panel-plate" class="panel active" style="display:flex;flex-direction:column;height:100%">
+            <div class="results-header">
+              <div class="results-title">VEHICLE REGISTRATION RECORD</div>
+              <div id="plate-status-indicator" class="status small">--</div>
+            </div>
+
+            <div id="plate-status" class="scroll">
+              <div class="no-results">No search performed.</div>
+            </div>
+          </section>
+
+          <!-- ID panel -->
+          <section id="panel-id" class="panel" style="display:none;flex-direction:column;height:100%">
+            <div class="results-header">
+              <div class="results-title">IDENTITY RECORD</div>
+              <div id="id-status-indicator" class="status small">--</div>
+            </div>
+
+            <div id="id-results" class="scroll">
+              <div class="no-results">No search performed.</div>
+            </div>
+          </section>
+
+          <!-- Reports panel -->
+          <section id="panel-reports" class="panel" style="display:none;flex-direction:column;height:100%">
+            <div class="results-header">
+              <div class="results-title">REPORTS</div>
+              <div class="status small">Records</div>
+            </div>
+
+            <div class="panel-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="report-title">Report Title</label>
+                  <input id="report-title" type="text" placeholder="Title" data-tooltip="Short title for the report" />
+                </div>
+                <div class="form-group">
+                  <label for="report-type">Report Type</label>
+                  <select id="report-type" data-tooltip="Report type">
+                    <option>General</option>
+                    <option>Traffic</option>
+                    <option>Use of Force</option>
+                    <option>Suspicious</option>
+                  </select>
+                </div>
+              </div>
+              
+              <div class="form-group">
+                <label for="report-desc">Description</label>
+                <textarea id="report-desc" placeholder="Description..." data-tooltip="Describe the incident"></textarea>
+              </div>
+
+              <div style="display:flex;gap:10px;margin-top:10px">
+                <button id="btn-create-report" class="btn" style="flex:1" data-tooltip="Create a new report">Create Report</button>
+                <button id="btn-list-reports" class="btn" style="flex:1" data-tooltip="Refresh report list">List Reports</button>
+              </div>
+            </div>
+
+            <div id="reports-list" class="scroll">
+              <div class="no-results">No reports.</div>
+            </div>
+          </section>
+
+          <!-- Warrants -->
+          <section id="panel-warrants" class="panel" style="display:none;flex-direction:column;height:100%">
+            <div class="results-header">
+              <div class="results-title">WARRANTS</div>
+              <div class="status small">Active / Inactive</div>
+            </div>
+
+            <div class="panel-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="warrant-subject">Subject Name</label>
+                  <input id="warrant-subject" type="text" placeholder="Subject Name" data-tooltip="Name to place on warrant" />
+                </div>
+                <div class="form-group">
+                  <label for="warrant-netid">NetID (optional)</label>
+                  <input id="warrant-netid" type="text" placeholder="NetID" data-tooltip="Optional NetID" />
+                </div>
+              </div>
+              
+              <div class="form-group">
+                <label for="warrant-charges">Charges / Details</label>
+                <textarea id="warrant-charges" placeholder="Charges / details..." data-tooltip="Charges or details for the warrant"></textarea>
+              </div>
+
+              <div style="display:flex;gap:10px;margin-top:10px">
+                <button id="btn-create-warrant" class="btn" style="flex:1" data-tooltip="Create a warrant">Create Warrant</button>
+                <button id="btn-list-warrants" class="btn" style="flex:1" data-tooltip="Refresh warrants list">List Warrants</button>
+              </div>
+            </div>
+
+            <div id="warrants-list" class="scroll">
+              <div class="no-results">No warrants.</div>
+            </div>
+          </section>
+
+          <!-- Dispatch -->
+          <section id="panel-dispatch" class="panel" style="display:none;flex-direction:column;height:100%">
+            <div class="results-header">
+              <div class="results-title">DISPATCH / CALLS</div>
+              <div class="status small">Live calls</div>
+            </div>
+
+            <div class="panel-form">
+              <div class="form-row">
+                <div class="form-group">
+                  <label for="dispatch-caller">Caller Name</label>
+                  <input id="dispatch-caller" type="text" placeholder="Caller Name" data-tooltip="Name of caller" />
+                </div>
+                <div class="form-group">
+                  <label for="dispatch-location">Location</label>
+                  <input id="dispatch-location" type="text" placeholder="Location" data-tooltip="Location of the call" />
+                </div>
+              </div>
+              
+              <div class="form-group">
+                <label for="dispatch-message">Message</label>
+                <textarea id="dispatch-message" placeholder="Message..." data-tooltip="Call details"></textarea>
+              </div>
+
+              <div style="display:flex;gap:10px;margin-top:10px">
+                <button id="btn-create-dispatch" class="btn" style="flex:1" data-tooltip="Create dispatch call">Create Dispatch</button>
+                <button id="btn-list-dispatch" class="btn" style="flex:1" data-tooltip="List active calls">List Dispatch</button>
+              </div>
+            </div>
+
+            <div id="dispatch-list" class="scroll">
+              <div class="no-results">No active calls.</div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <!-- bottom-right resize grip -->
+    <div class="resize-grip" id="resizeGrip" title="Drag to resize" data-tooltip="Drag to resize window" tabindex="0">
+      <div class="bars"><div></div></div>
+    </div>
+  </div>
+
+<script>
+  // NCIC MDT - behaviour preserved (keeps same IDs / message handling)
+  (function () {
+    'use strict';
+
+    // -----------------------
+    // layout persistence keys
+    // -----------------------
+    const LAYOUT_KEY = 'ncic_mdt_layout_v2';
+    function setCookie(name, value, days=365){ try { const d=new Date(); d.setTime(d.getTime() + (days*24*60*60*1000)); document.cookie = name + "=" + encodeURIComponent(value) + ";expires=" + d.toUTCString() + ";path=/"; } catch(e){} }
+    function getCookie(name){ try { const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)'); return m ? decodeURIComponent(m.pop()) : null; } catch(e){return null} }
+    function saveLayoutState(state){ try{ localStorage.setItem(LAYOUT_KEY, JSON.stringify(state)); }catch(e){} try{ setCookie(LAYOUT_KEY, JSON.stringify(state), 365);}catch(e){} }
+    function loadLayoutState(){ try{ const s = localStorage.getItem(LAYOUT_KEY); if(s) return JSON.parse(s); const c = getCookie(LAYOUT_KEY); if(c) return JSON.parse(c); }catch(e){} return null; }
+
+    // -----------------------
+    // keep original sendUI + DOM ids
+    // -----------------------
+    function sendUI(event, data) {
+      try {
+        fetch(`https://${GetParentResourceName()}/${event}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json; charset=UTF-8' },
+          body: JSON.stringify(data || {})
+        }).catch(e => {
+          console.warn('sendUI fetch error', e);
+        });
+      } catch (err) {
+        console.warn('sendUI error', err);
+      }
+    }
+
+    // DOM refs (IDs preserved so NUI messages still work)
+    const app = document.getElementById('app');
+    const btnClose = document.getElementById('btn-close');
+    const header = document.getElementById('app-header');
+    const grip = document.getElementById('resizeGrip');
+
+    const plateInput = document.getElementById('plate-input');
+    const plateHistorySel = document.getElementById('plate-history');
+    const btnPlate = document.getElementById('btn-plate');
+    const plateStatus = document.getElementById('plate-status');
+    const plateIndicator = document.getElementById('plate-status-indicator');
+
+    const idInput = document.getElementById('id-input');
+    const idHistorySel = document.getElementById('id-history');
+    const btnId = document.getElementById('btn-id');
+    const idResults = document.getElementById('id-results');
+    const idIndicator = document.getElementById('id-status-indicator');
+
+    // Reports refs
+    const reportTitle = document.getElementById('report-title');
+    const reportType  = document.getElementById('report-type');
+    const reportDesc  = document.getElementById('report-desc');
+    const btnCreateReport = document.getElementById('btn-create-report');
+    const btnListReports  = document.getElementById('btn-list-reports');
+    const reportsListEl   = document.getElementById('reports-list');
+
+    // Warrants refs
+    const warrantSubject = document.getElementById('warrant-subject');
+    const warrantNetId   = document.getElementById('warrant-netid');
+    const warrantCharges = document.getElementById('warrant-charges');
+    const btnCreateWarrant = document.getElementById('btn-create-warrant');
+    const btnListWarrants  = document.getElementById('btn-list-warrants');
+    const warrantsListEl   = document.getElementById('warrants-list');
+
+    // Dispatch refs
+    const dispatchCaller   = document.getElementById('dispatch-caller');
+    const dispatchLocation = document.getElementById('dispatch-location');
+    const dispatchMessage  = document.getElementById('dispatch-message');
+    const btnCreateDispatch = document.getElementById('btn-create-dispatch');
+    const btnListDispatch   = document.getElementById('btn-list-dispatch');
+    const dispatchListEl    = document.getElementById('dispatch-list');
+
+    // Tabs (nav is vertical now, but still uses same selector)
+    document.querySelectorAll('nav button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
+        btn.classList.add('active');
+        const panel = document.getElementById('panel-' + btn.dataset.tab);
+        if (panel) panel.style.display = 'flex';
+
+        // auto-call list when jumping to a section
+        const which = btn.dataset.tab;
+        if (which === 'reports') sendUI('listReports', {});
+        if (which === 'warrants') sendUI('listWarrants', {});
+        if (which === 'dispatch') sendUI('listDispatch', {});
+      });
+    });
+
+    // Close handlers
+    if (btnClose) btnClose.onclick = () => sendUI('escape', {});
+    window.addEventListener('keydown', e => {
+      if (e.key === 'Escape') sendUI('escape', {});
+      // quick keyboard jump keys (F1-F5) to mimic MDT
+      if (e.key === 'F1') document.querySelector('nav button[data-tab="plate"]').click();
+      if (e.key === 'F2') document.querySelector('nav button[data-tab="id"]').click();
+      if (e.key === 'F3') document.querySelector('nav button[data-tab="reports"]').click();
+      if (e.key === 'F4') document.querySelector('nav button[data-tab="warrants"]').click();
+      if (e.key === 'F5') document.querySelector('nav button[data-tab="dispatch"]').click();
+    });
+
+    // Plate lookup
+    if (btnPlate) btnPlate.onclick = () => {
+      const plate = (plateInput.value || '').trim();
+      if (plate) sendUI('lookupPlate', { plate });
+    };
+
+    // ID lookup (NetID or "First Last")
+    if (btnId) btnId.onclick = () => {
+      const v = (idInput.value || '').trim();
+      if (!v) {
+        sendUI('lookupID', {});
+        return;
+      }
+      if (v.indexOf(' ') !== -1) {
+        sendUI('lookupID', { name: v });
+      } else {
+        sendUI('lookupID', { netId: v });
+      }
+    };
+
+    // History selects handlers
+    if (plateHistorySel) plateHistorySel.onchange = () => {
+      const v = plateHistorySel.value;
+      if (v) {
+        plateInput.value = v;
+        sendUI('lookupPlate', { plate: v });
+      }
+    };
+
+    if (idHistorySel) idHistorySel.onchange = () => {
+      const v = idHistorySel.value;
+      if (!v) return;
+      idInput.value = v;
+      if (v.indexOf(' ') !== -1) sendUI('lookupID', { name: v });
+      else sendUI('lookupID', { netId: v });
+    };
+
+    // Reports actions
+    if (btnCreateReport) btnCreateReport.onclick = () => {
+      const title = (reportTitle.value || '').trim();
+      const type  = (reportType.value || 'General').trim();
+      const desc  = (reportDesc.value || '').trim();
+      if (!title || !desc) return alert('Title and description required');
+      sendUI('createReport', { title, description: desc, type });
+      // clear
+      reportTitle.value = '';
+      reportDesc.value = '';
+      // refresh list
+      setTimeout(() => sendUI('listReports', {}), 250);
+    }
+    if (btnListReports) btnListReports.onclick = () => sendUI('listReports', {});
+
+    // Warrants actions
+    if (btnCreateWarrant) btnCreateWarrant.onclick = () => {
+      const name = (warrantSubject.value || '').trim();
+      const nid  = (warrantNetId.value || '').trim();
+      const ch   = (warrantCharges.value || '').trim();
+      if (!name || !ch) return alert('Subject and charges required');
+      sendUI('createWarrant', { subject_name: name, subject_netId: nid, charges: ch });
+      warrantSubject.value = ''; warrantNetId.value = ''; warrantCharges.value = '';
+      setTimeout(() => sendUI('listWarrants', {}), 250);
+    }
+    if (btnListWarrants) btnListWarrants.onclick = () => sendUI('listWarrants', {});
+
+    // Dispatch actions
+    if (btnCreateDispatch) btnCreateDispatch.onclick = () => {
+      const caller = (dispatchCaller.value || '').trim();
+      const loc = (dispatchLocation.value || '').trim();
+      const msg = (dispatchMessage.value || '').trim();
+      if (!caller || !loc || !msg) return alert('Fill caller, location and message');
+      sendUI('createDispatch', { caller_name: caller, location: loc, message: msg });
+      dispatchCaller.value = ''; dispatchLocation.value = ''; dispatchMessage.value = '';
+      // server will broadcast; still refresh list shortly
+      setTimeout(() => sendUI('listDispatch', {}), 300);
+    }
+    if (btnListDispatch) btnListDispatch.onclick = () => sendUI('listDispatch', {});
+
+    // Helpers
+    function clearChildren(el) {
+      while (el && el.firstChild) el.removeChild(el.firstChild);
+    }
+
+    function createHeaderGrid(pairsHtml) {
+      const grid = document.createElement('div');
+      grid.className = 'record-grid header';
+      grid.innerHTML = pairsHtml.join('');
+      return grid;
+    }
+
+    // render helpers for reports/warrants/dispatch
+    function renderReports(records) {
+      clearChildren(reportsListEl);
+      if (!records || records.length === 0) {
+        const nr = document.createElement('div'); nr.className='no-results'; nr.textContent='No reports.'; reportsListEl.appendChild(nr); return;
+      }
+      records.forEach(r => {
+        const rec = document.createElement('div'); rec.className='record';
+        // Added REPORTER field (shows creator_identifier and optional creator_discord)
+        const reporterLabelHtml = `<div class="record-label">REPORTER</div>`;
+        const discordPart = r.creator_discord ? ` <span style="font-weight:400;color:var(--muted);font-size:12px">(${escapeHtml(r.creator_discord)})</span>` : '';
+        const reporterValueHtml = `<div class="record-value">${escapeHtml(r.creator_identifier || '')}${discordPart}</div>`;
+
+        rec.innerHTML = `
+          <div class="record-field">
+            <div class="record-label">DATE/TIME</div>
+            <div class="record-value">${escapeHtml(r.timestamp || '')}</div>
+          </div>
+
+          <div class="record-field" style="display:flex;flex-direction:column;align-items:flex-end">
+            <div style="display:flex;gap:8px;align-items:center">
+              <div class="record-label">TITLE</div>
+              <div class="record-value">${escapeHtml(r.title || r.rtype || '')}</div>
+            </div>
+            <div style="margin-top:6px">
+              <button class="tiny-btn" data-action="delete-report" data-id="${escapeHtml(r.id || '')}">Delete</button>
+            </div>
+          </div>
+
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(r.description || '')}</div>
+
+          <div style="grid-column:1 / -1;margin-top:8px;display:flex;justify-content:flex-start;gap:12px;align-items:center">
+            <div style="display:flex;flex-direction:column">
+              ${reporterLabelHtml}
+              ${reporterValueHtml}
+            </div>
+          </div>
+        `;
+        reportsListEl.appendChild(rec);
+      });
+    }
+
+    function renderWarrants(records) {
+      clearChildren(warrantsListEl);
+      if (!records || records.length === 0) {
+        const nr = document.createElement('div'); nr.className='no-results'; nr.textContent='No warrants.'; warrantsListEl.appendChild(nr); return;
+      }
+      records.forEach(r => {
+        const rec = document.createElement('div'); rec.className='record';
+        rec.innerHTML = `
+          <div class="record-field">
+            <div class="record-label">DATE/TIME</div>
+            <div class="record-value">${escapeHtml(r.timestamp || '')}</div>
+          </div>
+          <div class="record-field">
+            <div class="record-label">SUBJECT</div>
+            <div class="record-value">${escapeHtml(r.subject_name || '')} ${r.subject_netId ? '('+escapeHtml(r.subject_netId)+')':''}</div>
+          </div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(r.charges || '')}</div>
+          <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;margin-top:6px">
+            <button class="tiny-btn" data-action="remove-warrant" data-id="${escapeHtml(r.id || '')}">${r.active == 1 || r.active === '1' ? 'Revoke' : 'Reactivate'}</button>
+          </div>
+        `;
+        warrantsListEl.appendChild(rec);
+      });
+    }
+
+    function renderDispatch(records) {
+      clearChildren(dispatchListEl);
+      if (!records || records.length === 0) {
+        const nr = document.createElement('div'); nr.className='no-results'; nr.textContent='No active calls.'; dispatchListEl.appendChild(nr); return;
+      }
+      records.forEach(r => {
+        const rec = document.createElement('div'); rec.className='record';
+        const status = escapeHtml(r.status || '');
+        rec.innerHTML = `
+          <div class="record-field">
+            <div class="record-label">DATE/TIME</div>
+            <div class="record-value">${escapeHtml(r.timestamp || '')}</div>
+          </div>
+          <div class="record-field">
+            <div class="record-label">CALLER / LOC</div>
+            <div class="record-value">${escapeHtml(r.caller_name || '')} — ${escapeHtml(r.location || '')}</div>
+          </div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(r.message || '')}</div>
+          <div style="grid-column:1 / -1;display:flex;justify-content:space-between;align-items:center;margin-top:6px">
+            <div class="small">Status: <strong>${status}</strong></div>
+            <div>
+              <button class="tiny-btn" data-action="ack-dispatch" data-id="${escapeHtml(r.id || '')}">Acknowledge</button>
+            </div>
+          </div>
+        `;
+        dispatchListEl.appendChild(rec);
+      });
+    }
+
+    // delegated click handlers (delete/ack)
+    document.body.addEventListener('click', function (ev) {
+      const t = ev.target;
+      if (!t || !t.dataset) return;
+      if (t.dataset.action === 'delete-report') {
+        const id = t.dataset.id; if (!id) return;
+        if (!confirm('Delete report #' + id + '?')) return;
+        sendUI('deleteReport', { id });
+        setTimeout(() => sendUI('listReports', {}), 200);
+      }
+      if (t.dataset.action === 'remove-warrant') {
+        const id = t.dataset.id; if (!id) return;
+        sendUI('removeWarrant', { id });
+        setTimeout(() => sendUI('listWarrants', {}), 200);
+      }
+      if (t.dataset.action === 'ack-dispatch') {
+        const id = t.dataset.id; if (!id) return;
+        sendUI('ackDispatch', { id });
+        setTimeout(() => sendUI('listDispatch', {}), 200);
+      }
+    });
+
+    // NUI messages
+    window.addEventListener('message', evt => {
+      const d = evt.data;
+      if (!d) return;
+
+      // open/close
+      if (d.action === 'open' && app) {
+        app.classList.add('open');
+        tryApplySavedLayout();
+      }
+      if (d.action === 'close' && app) app.classList.remove('open');
+
+      // allow client to request opening a specific tab
+      if (d.action === 'openSection') {
+        const section = d.section || 'plate';
+        const btn = document.querySelector(`nav button[data-tab="${section}"]`);
+        if (btn) btn.click();
+      }
+
+      // populate initial fields and history list data
+      if (d.action === 'populate') {
+        if (d.plate != null) plateInput.value = d.plate;
+
+        if (d.lastPedName && d.lastPedName !== '') idInput.value = d.lastPedName;
+        else if (d.netId != null && d.netId !== '') idInput.value = d.netId;
+        else idInput.value = '';
+
+        if (Array.isArray(d.plateHistory) && plateHistorySel) {
+          plateHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
+          d.plateHistory.forEach(p => {
+            const o = document.createElement('option');
+            o.value = p;
+            o.textContent = p;
+            plateHistorySel.appendChild(o);
+          });
+        }
+
+        if (Array.isArray(d.idHistory) && idHistorySel) {
+          idHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
+          d.idHistory.forEach(i => {
+            const o = document.createElement('option');
+            o.value = i;
+            o.textContent = i;
+            idHistorySel.appendChild(o);
+          });
+        }
+      }
+
+      // plateResult rendering
+      if (d.action === 'plateResult' && plateStatus && plateIndicator) {
+        clearChildren(plateStatus);
+        const st = (d.status || '').toLowerCase();
+        plateIndicator.textContent = d.status || '';
+        plateIndicator.className = 'status small ' + st;
+
+        const grid = createHeaderGrid([
+          `<div>PLATE</div><div>${escapeHtml(d.plate || '')}</div>`,
+          `<div>MAKE/MODEL</div><div>${escapeHtml(d.make || '')}</div>`,
+          `<div>COLOR</div><div>${escapeHtml(d.color || '')}</div>`,
+          `<div>OWNER</div><div>${escapeHtml(d.owner || '')}</div>`,
+          `<div>INSURANCE</div><div>${escapeHtml(d.insurance || '')}</div>`
+        ]);
+        plateStatus.appendChild(grid);
+
+        const records = Array.isArray(d.records) ? d.records : [];
+        if (records.length === 0) {
+          const nr = document.createElement('div');
+          nr.className = 'no-results';
+          nr.textContent = 'No history records for this plate.';
+          plateStatus.appendChild(nr);
+        } else {
+          records.forEach(r => {
+            const whoName = ((r.first_name || '') + (r.last_name ? ' ' + r.last_name : '')).trim() ||
+              r.identifier || '';
+            const rec = document.createElement('div');
+            rec.className = 'record';
+            rec.innerHTML = `
+              <div class="record-field">
+                <div class="record-label">DATE/TIME</div>
+                <div class="record-value">${escapeHtml(r.timestamp || '')}</div>
+              </div>
+              <div class="record-field">
+                <div class="record-label">INCIDENT</div>
+                <div class="record-value">${escapeHtml(whoName || r.identifier || '')}</div>
+              </div>
+            `;
+            plateStatus.appendChild(rec);
+          });
+        }
+      }
+
+      // idResult rendering
+      if (d.action === 'idResult' && idResults && idIndicator) {
+        clearChildren(idResults);
+        const ls = (d.licenseStatus || '').toLowerCase();
+        idIndicator.textContent = d.licenseStatus || '';
+        idIndicator.className = 'status small ' + ls;
+
+        const headerPairs = [
+          `<div>NET ID</div><div>${escapeHtml(d.netId || '')}</div>`,
+          `<div>NAME</div><div>${escapeHtml(d.name || '')}</div>`,
+          `<div>DOB</div><div>${escapeHtml(d.dob || '')}</div>`,
+          `<div>LICENSE</div><div>${escapeHtml(d.licenseStatus || '')}</div>`
+        ];
+        const info = createHeaderGrid(headerPairs);
+        idResults.appendChild(info);
+
+        const records = Array.isArray(d.records) ? d.records : [];
+        if (records.length === 0) {
+          const nr = document.createElement('div');
+          nr.className = 'no-results';
+          nr.textContent = 'No ID history found.';
+          idResults.appendChild(nr);
+        } else {
+          records.forEach(r => {
+            const whoName = ((r.first_name || '') + (r.last_name ? ' ' + r.last_name : '')).trim() ||
+              r.identifier || r.netId || '';
+            const rec = document.createElement('div');
+            rec.className = 'record';
+            rec.innerHTML = `
+              <div class="record-field">
+                <div class="record-label">DATE/TIME</div>
+                <div class="record-value">${escapeHtml(r.timestamp || '')}</div>
+              </div>
+              <div class="record-field">
+                <div class="record-label">TYPE</div>
+                <div class="record-value">${escapeHtml(r.type || whoName || '')}</div>
+              </div>
+            `;
+            idResults.appendChild(rec);
+          });
+        }
+
+        if (Array.isArray(d.records) && idHistorySel) {
+          idHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
+          const seen = new Set();
+          d.records.forEach(r => {
+            const display = ((r.first_name || '') + (r.last_name ? ' ' + r.last_name : '')).trim() ||
+              r.netId || r.identifier || '';
+            if (display && !seen.has(display)) {
+              seen.add(display);
+              const o = document.createElement('option');
+              o.value = display;
+              o.textContent = display;
+              idHistorySel.appendChild(o);
+            }
+          });
+        }
+      }
+
+      // reportsResult
+      if (d.action === 'reportsResult') {
+        renderReports(d.records || []);
+      }
+
+      // warrantsResult
+      if (d.action === 'warrantsResult') {
+        renderWarrants(d.records || []);
+      }
+
+      // dispatchResult
+      if (d.action === 'dispatchResult') {
+        renderDispatch(d.records || []);
+      }
+
+      // dispatchNotify (push)
+      if (d.action === 'dispatchNotify' && d.call) {
+        // make a little visual ping in dispatch tab
+        const prev = document.querySelector('nav button[data-tab="dispatch"]');
+        if (prev) {
+          prev.classList.add('active');
+          // show brief highlight
+          prev.style.boxShadow = 'inset 0 0 18px rgba(0,255,140,0.1)';
+          setTimeout(()=>prev.style.boxShadow='',800);
+        }
+        // show the call in the dispatch panel (prepend)
+        // fetch fresh list too
+        setTimeout(()=> sendUI('listDispatch', {}), 200);
+        // also show modal-like notification in results area
+        const c = d.call;
+        // small DOM toast in dispatch-list
+        const toast = document.createElement('div');
+        toast.className = 'record';
+        toast.innerHTML = `
+          <div class="record-field">
+            <div class="record-label">NEW CALL</div>
+            <div class="record-value">${escapeHtml(c.caller_name || '')} — ${escapeHtml(c.location || '')}</div>
+          </div>
+          <div class="record-field">
+            <div class="record-label">TIME</div>
+            <div class="record-value">${escapeHtml(c.timestamp || '')}</div>
+          </div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(c.message || '')}</div>
+          <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;margin-top:6px">
+            <button class="tiny-btn" data-action="ack-dispatch" data-id="${escapeHtml(c.id || '')}">Acknowledge</button>
+          </div>
+        `;
+        // prepend to dispatch list area
+        if (dispatchListEl) {
+          dispatchListEl.insertBefore(toast, dispatchListEl.firstChild);
+        }
+      }
+    });
+
+    // escape helper
+    function escapeHtml(str) {
+      if (!str && str !== 0) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    // -----------------------
+    // Drag & Resize logic
+    // -----------------------
+    function px(v){ return parseFloat(String(v||'').replace('px',''))||0; }
+
+    // apply saved layout when opened
+    let appliedSaved = false;
+    function tryApplySavedLayout(){
+      if (appliedSaved) return;
+      appliedSaved = true;
+      const s = loadLayoutState();
+      if (s && app) {
+        if (s.left !== undefined && s.top !== undefined) {
+          app.style.left = s.left + 'px';
+          app.style.top = s.top + 'px';
+          app.style.transform = 'none';
+        }
+        if (s.width) app.style.width = s.width + 'px';
+        if (s.height) app.style.height = s.height + 'px';
+      }
+    }
+
+    // initial apply if app already open
+    (function initSavedPosition(){
+      const s = loadLayoutState();
+      if (s && app) {
+        if (s.left !== undefined && s.top !== undefined) { app.style.left = s.left + 'px'; app.style.top = s.top + 'px'; app.style.transform = 'none'; }
+        if (s.width) app.style.width = s.width + 'px';
+        if (s.height) app.style.height = s.height + 'px';
+      }
+    })();
+
+    // Drag (header)
+    (function enableDrag(){
+      if (!header || !app) return;
+      let dragging=false, sx=0, sy=0, startLeft=0, startTop=0;
+      function onDown(e){
+        if (e.button !== undefined && e.button !== 0) return;
+        dragging=true;
+        sx = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX);
+        sy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
+        startLeft = px(window.getComputedStyle(app).left || app.style.left) || (window.innerWidth/2 - app.offsetWidth/2);
+        startTop = px(window.getComputedStyle(app).top || app.style.top) || (window.innerHeight*0.05);
+        if (app.style.transform && app.style.transform.indexOf('translateX') !== -1) app.style.transform = 'none';
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        e.preventDefault();
+      }
+      function onMove(e){
+        if (!dragging) return;
+        const cx = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX);
+        const cy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
+        const dx = cx - sx, dy = cy - sy;
+        let nl = startLeft + dx, nt = startTop + dy;
+        const maxLeft = window.innerWidth - app.offsetWidth - 8;
+        const maxTop = window.innerHeight - app.offsetHeight - 8;
+        nl = Math.max(8, Math.min(maxLeft, nl));
+        nt = Math.max(8, Math.min(maxTop, nt));
+        app.style.left = Math.round(nl) + 'px';
+        app.style.top  = Math.round(nt) + 'px';
+      }
+      function onUp(){
+        if (!dragging) return;
+        dragging=false;
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        saveLayoutState({
+          left: Math.round(px(app.style.left || window.getComputedStyle(app).left)),
+          top:  Math.round(px(app.style.top  || window.getComputedStyle(app).top)),
+          width: Math.round(px(app.style.width || window.getComputedStyle(app).width)),
+          height: Math.round(px(app.style.height || window.getComputedStyle(app).height))
+        });
+      }
+      header.addEventListener('pointerdown', onDown);
+      header.addEventListener('dblclick', function(){
+        app.style.left = '50%';
+        app.style.top = '5%';
+        app.style.transform = 'translateX(-50%)';
+        saveLayoutState({ left: undefined, top: undefined, width: Math.round(px(app.style.width || window.getComputedStyle(app).width)), height: Math.round(px(app.style.height || window.getComputedStyle(app).height)) });
+      });
+    })();
+
+    // Resize (grip)
+    (function enableResize(){
+      if (!grip || !app) return;
+      // defensive: ensure grip remains a child of app so positioning is relative to app
+      if (grip.parentNode !== app) app.appendChild(grip);
+
+      let resizing=false, sx=0, sy=0, startW=0, startH=0;
+      const MIN_W = 480, MIN_H = 340;
+      function onDown(e){
+        if (e.button !== undefined && e.button !== 0) return;
+        resizing=true;
+        sx = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX);
+        sy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
+        startW = app.offsetWidth;
+        startH = app.offsetHeight;
+        document.addEventListener('pointermove', onMove);
+        document.addEventListener('pointerup', onUp);
+        e.preventDefault();
+      }
+      function onMove(e){
+        if (!resizing) return;
+        const cx = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX);
+        const cy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
+        const dx = cx - sx, dy = cy - sy;
+        let nw = Math.max(MIN_W, startW + dx);
+        let nh = Math.max(MIN_H, startH + dy);
+        // clamp to viewport
+        const currentLeft = px(app.style.left || window.getComputedStyle(app).left) || 8;
+        nw = Math.min(window.innerWidth - currentLeft - 8, nw);
+        const currentTop = px(app.style.top || window.getComputedStyle(app).top) || 8;
+        nh = Math.min(window.innerHeight - currentTop - 8, nh);
+        app.style.width = Math.round(nw) + 'px';
+        app.style.height = Math.round(nh) + 'px';
+      }
+      function onUp(){
+        if (!resizing) return;
+        resizing=false;
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        saveLayoutState({
+          left: px(app.style.left || window.getComputedStyle(app).left) || undefined,
+          top: px(app.style.top || window.getComputedStyle(app).top) || undefined,
+          width: Math.round(px(app.style.width || window.getComputedStyle(app).width)),
+          height: Math.round(px(app.style.height || window.getComputedStyle(app).height))
+        });
+      }
+      grip.addEventListener('pointerdown', onDown);
+
+      // keyboard accessibility for grip (arrows change size)
+      grip.addEventListener('keydown', (e) => {
+        const step = e.shiftKey ? 10 : 30;
+        if (!app) return;
+        switch(e.key){
+          case 'ArrowRight': app.style.width = (app.offsetWidth + step) + 'px'; break;
+          case 'ArrowLeft': app.style.width = Math.max(MIN_W, app.offsetWidth - step) + 'px'; break;
+          case 'ArrowDown': app.style.height = (app.offsetHeight + step) + 'px'; break;
+          case 'ArrowUp': app.style.height = Math.max(MIN_H, app.offsetHeight - step) + 'px'; break;
+          case 'Enter':
+            saveLayoutState({ left: px(app.style.left || window.getComputedStyle(app).left) || undefined, top: px(app.style.top || window.getComputedStyle(app).top) || undefined, width: Math.round(px(app.style.width || window.getComputedStyle(app).width)), height: Math.round(px(app.style.height || window.getComputedStyle(app).height)) });
+            break;
+        }
+      });
+    })();
+
+    // keep MDT on-screen after viewport resize
+    window.addEventListener('resize', () => {
+      if (!app) return;
+      const left = px(app.style.left || window.getComputedStyle(app).left);
+      const top  = px(app.style.top  || window.getComputedStyle(app).top);
+      const w    = app.offsetWidth;
+      const h    = app.offsetHeight;
+      let changed=false;
+      let newLeft = left, newTop = top;
+      if (left + w > window.innerWidth - 8) { newLeft = Math.max(8, window.innerWidth - w - 8); changed=true; }
+      if (top + h > window.innerHeight - 8) { newTop = Math.max(8, window.innerHeight - h - 8); changed=true; }
+      if (changed) { app.style.left = newLeft + 'px'; app.style.top = newTop + 'px'; saveLayoutState({ left: Math.round(newLeft), top: Math.round(newTop), width: Math.round(w), height: Math.round(h) }); }
+    });
+
+    // Try to apply saved layout immediately on open if message triggers open
+    let applied = false;
+    function tryApplySavedLayout(){
+      if (applied) return;
+      applied = true;
+      const s = loadLayoutState();
+      if (s && app) {
+        if (s.left !== undefined && s.top !== undefined) { app.style.left = s.left + 'px'; app.style.top = s.top + 'px'; app.style.transform = 'none'; }
+        if (s.width) app.style.width = s.width + 'px';
+        if (s.height) app.style.height = s.height + 'px';
+      }
+    }
+
+    // expose for debugging
+    window._ncic_sendUI = sendUI;
+
+    // defensive: ensure grip is last child so it sits visually above content
+    if (grip && app && grip.parentNode !== app) app.appendChild(grip);
+    if (grip) grip.style.left = 'auto'; // force left auto so right placement is used
+  })();
+</script>
+</body>
+</html>
