@@ -1,5 +1,3 @@
--- client.lua (full, minus generatePerson())
-
 local stopEnabled, debugEnabled = true, true
 local pedData, lastPedNetId = {}, nil
 local lastPedEntity = nil          
@@ -2870,3 +2868,4 @@ AddEventHandler("onResourceStop", function(resName)
     pullVeh = nil
   end
 end)
+
