@@ -1,0 +1,45 @@
+-- callouts/dog_attack.callout (fixed: use TaskCombatPed)
+return {
+  title = "Dog Attacking Person",
+  description = "Caller reports a dog attacking someone.",
+  server = {
+    coords = { x = 230.0, y = -800.0, z = 29.0 }
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local model = GetHashKey("a_c_rottweiler")
+        RequestModel(model)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(model) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+        local dog = CreatePed(28, model, coords.x, coords.y, coords.z + 0.2, 0.0, true, false)
+        if DoesEntityExist(dog) then
+          SetEntityAsMissionEntity(dog, true, true)
+          SetPedCombatAttributes(dog, 46, true)
+          SetPedCombatAttributes(dog, 3, true)
+          SetPedKeepTask(dog, true)
+
+          -- select nearest player/ped target
+          local target = PlayerPedId()
+          -- attempt to find nearest player ped if available
+          local players = GetActivePlayers()
+          if players and #players > 0 then
+            for i=1, #players do
+              local p = GetPlayerPed(players[i])
+              if p and p ~= 0 and p ~= dog then
+                target = p
+                break
+              end
+            end
+          end
+
+          -- use TaskCombatPed to attack the chosen target
+          TaskCombatPed(dog, target, 0, 16)
+        end
+
+        -- return the dog entity so client can delete it later
+        return { dog }
+      end
+    ]]
+  }
+}

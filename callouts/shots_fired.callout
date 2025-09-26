@@ -1,0 +1,35 @@
+return {
+  title = "Shots Fired",
+  description = "Caller reports multiple shots fired. Armed suspect is shooting.",
+  server = {
+    getCoords = function()
+      local base = { x = 245.0, y = -820.0, z = 29.0 }
+      local rx = base.x + math.random(-25,25)
+      local ry = base.y + math.random(-25,25)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedHash = GetHashKey("g_m_y_famfor_01")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z + 0.5, 0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped, true, true)
+          GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 200, false, true)
+          SetPedAccuracy(ped, 30)
+          SetPedCombatAttributes(ped, 46, true)
+          SetPedCombatAbility(ped, 2)
+          SetPedKeepTask(ped, true)
+          TaskCombatPed(ped, PlayerPedId(), 0, 16)
+        end
+
+        -- return the ped handle so the client can delete it later
+        return { ped }
+      end
+    ]]
+  }
+}

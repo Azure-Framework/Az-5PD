@@ -1,0 +1,47 @@
+return {
+  title = "Drunk Driver",
+  description = "Caller reports a vehicle being driven erratically.",
+  server = {
+    getCoords = function()
+      local base = { x = 215.76, y = -810.12, z = 30.73 }
+      local rx = base.x + math.random(-40,40)
+      local ry = base.y + math.random(-40,40)
+      return { x = rx, y = ry, z = base.z }
+    end,
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local vehHash = GetHashKey("btype3")
+        local pedHash = GetHashKey("a_m_m_bevhills_01")
+        RequestModel(vehHash); RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while (not HasModelLoaded(vehHash) or not HasModelLoaded(pedHash)) and GetGameTimer()-t0 < 3000 do Citizen.Wait(10) end
+        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z + 0.5, 0.0, true, false)
+        local driver = nil
+        if DoesEntityExist(veh) then
+          SetEntityAsMissionEntity(veh, true, true)
+          SetVehicleOnGroundProperly(veh)
+          driver = CreatePedInsideVehicle(veh, 4, pedHash, -1, true, false)
+          if DoesEntityExist(driver) then
+            SetPedKeepTask(driver, true)
+            TaskVehicleDriveWander(driver, veh, 25.0, 786603)
+            SetPedAsCop(driver, false)
+          end
+        end
+
+        -- return cleanup function
+        return function()
+          if DoesEntityExist(driver) then
+            SetEntityAsMissionEntity(driver, true, true)
+            DeletePed(driver)
+          end
+          if DoesEntityExist(veh) then
+            SetEntityAsMissionEntity(veh, true, true)
+            DeleteVehicle(veh)
+          end
+        end
+      end
+    ]]
+  }
+}

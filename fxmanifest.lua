@@ -1,22 +1,27 @@
 fx_version 'cerulean'
 games { 'gta5' }
-author 'Azure(TheStoicBear)'
-description 'Az-5PD'
-version '1.0'
+
+author 'Azure First Response'
+version '1.5'
 lua54 'yes'
 
 ui_page 'ui/index.html'
 files { 'ui/index.html' }
 
-shared_script '@ox_lib/init.lua'
+shared_scripts {
+    '@ox_lib/init.lua',
+    'config.lua'
+}
 
 client_scripts {
-    'source/client.lua'
+    'source/client.lua',
+    'client.lua',
 }
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
-    'source/server.lua'
+    'source/server.lua',
+    'server.lua'
 }
 
 -- ensure these resources are present before starting this resource
@@ -25,4 +30,9 @@ dependencies {
     'ox_target',
     'oxmysql',
     'Az-Framework'
+}
+
+files {
+  'callouts/manifest.json',
+  'callouts/*.callout'
 }

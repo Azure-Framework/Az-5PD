@@ -1,3 +1,8 @@
+-- server.lua
+-- MDT server logic: DB tables and event handlers for citations, arrests, plates, IDs,
+-- plus Reports / Warrants / Dispatch features.
+-- Robust DB wrapper: supports oxmysql (exports.oxmysql:execute) and mysql-async (MySQL.Async.*)
+
 -- Helper DB wrapper to support both oxmysql and mysql-async
 local function dbExecute(query, params, cb)
   params = params or {}

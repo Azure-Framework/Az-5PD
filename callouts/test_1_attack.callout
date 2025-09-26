@@ -1,0 +1,42 @@
+return {
+  title = "Custom Attack 1",
+  description = "Custom callout\nvector3(1705.648, 3251.097, 41.006)",
+  server = {
+    getCoords = function()
+      local base = { x = 1705.648, y = 3251.097, z = 41.006 }
+      local rx = base.x + math.random(-40, 40)
+      local ry = base.y + math.random(-40, 40)
+      return { x = rx, y = ry, z = base.z }
+    end,
+  },
+  client = {
+    script = [[
+return function(coords)
+  local spawned = { vehicles = {}, peds = {}, props = {} }
+
+  local model_0 = GetHashKey("sanchez")
+  RequestModel(model_0)
+
+  local veh_0_0 = CreateVehicle(model_0, coords.x + 0, coords.y + 0, coords.z + 0, math.random() * 360.0, true, false)
+  if DoesEntityExist(veh_0_0) then
+    SetEntityAsMissionEntity(veh_0_0, true, true)
+    SetVehicleOnGroundProperly(veh_0_0)
+    local drv_0_0 = nil
+    if model_0 ~= nil then
+      drv_0_0 = CreatePedInsideVehicle(veh_0_0, 4, model_0, -1, true, false)
+      if DoesEntityExist(drv_0_0) then SetEntityAsMissionEntity(drv_0_0, true, true); SetPedKeepTask(drv_0_0, true); end
+    end
+    table.insert(spawned.vehicles, veh_0_0)
+    if drv_0_0 ~= nil then table.insert(spawned.peds, drv_0_0) end
+  end
+
+
+  return function()
+    for _,p in ipairs(spawned.peds) do if DoesEntityExist(p) then SetEntityAsMissionEntity(p, true, true); DeletePed(p); end end
+    for _,v in ipairs(spawned.vehicles) do if DoesEntityExist(v) then SetEntityAsMissionEntity(v, true, true); DeleteVehicle(v); end end
+    for _,o in ipairs(spawned.props) do if DoesEntityExist(o) then SetEntityAsMissionEntity(o, true, true); DeleteEntity(o); end end
+  end
+end
+    ]]
+  }
+}
