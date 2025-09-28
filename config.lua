@@ -16,21 +16,26 @@ Config.Timings = Config.Timings or {
   defaultWait = 1000,
   postPullCheck = 600,
 }
-
 Config.Flee = Config.Flee or {
-  enable = true,                    -- master switch for flee/attack features
-  baseFleeChance = 0.20,            -- base chance (0..1) NPC will flee when a pull is attempted
-  warrantFleeChance = 0.60,         -- minimum flee chance if the NPC is wanted
-  suspendedFleeChance = 0.50,       -- minimum flee chance if the NPC has a suspended license
-  attackChanceIfWarrant = 0.25,     -- extra chance to attack if wanted
-  attackChanceIfSuspended = 0.15,   -- extra chance to attack if license suspended
-  fleeDriveSpeed = 40.0,            -- speed used when fleeing (tweak per-server)
-  fleeDriveStyle = 786603,          -- driving style flag used for fleeing (may be adjusted)
-  driverAbility = 1.0,              -- SetDriverAbility value during flee (0.0 - 1.0)
-  driverAggressiveness = 1.0,       -- SetDriverAggressiveness value during flee
-  weaponName = "WEAPON_PISTOL",     -- give a basic pistol to NPC attackers for threat
+  enable = true,
+  baseFleeChance = 0.20,
+  warrantFleeChance = 0.60,
+  suspendedFleeChance = 0.50,
+  attackChanceIfWarrant = 0.25,
+  attackChanceIfSuspended = 0.15,
+  fleeDriveSpeed = 40.0,
+  fleeDriveStyle = 786603,
+  driverAbility = 1.0,
+  driverAggressiveness = 1.0,
+  weaponName = "WEAPON_PISTOL",
   attackAmmo = 45,
-  attackNotify = true,              -- send a notify when an NPC attacks the player
+  attackNotify = true,
+
+  -- new options for blip/countdown:
+  blipSprite = 225,   -- default blip icon (225 is vehicle)
+  blipColour = 1,     -- blip colour
+  chaseDistance = 120.0, -- meters before countdown starts
+  chaseTimeout = 15,     -- seconds until chase stops once target is out of range
 }
 
 Config.Messages = Config.Messages or {

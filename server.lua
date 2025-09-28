@@ -852,3 +852,18 @@ exports(
         end
     end
 )
+
+
+
+RegisterNetEvent('mdt:requestRecords')
+AddEventHandler('mdt:requestRecords', function(targetType, targetValue)
+  local src = source
+  exports.oxmysql:execute(
+    'SELECT id, target_type, target_value, rtype, title, description, creator_identifier, creator_discord, timestamp FROM mdt_id_records WHERE target_type = ? AND target_value = ? ORDER BY timestamp DESC',
+    { targetType, targetValue },
+    function(rows)
+      
+      TriggerClientEvent('mdt:recordsResult', src, rows, targetType)
+    end
+  )
+end)

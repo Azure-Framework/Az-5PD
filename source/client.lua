@@ -218,8 +218,8 @@ local lastPlate, lastPlateHistory = nil, {}
 local lastIdHistory = {}
 local lastMake, lastColor = nil, nil
 
-local HOLD_SURRENDER_MS = 1500 
-local HOLD_PULL_MS = 800       
+local HOLD_SURRENDER_MS = 3000 
+local HOLD_PULL_MS = 1500       
 
 local citationReasons = {
   "Speeding","Reckless Driving","Illegal Parking",
@@ -1048,6 +1048,63 @@ local function requestModelSync(hash)
   return HasModelLoaded(hash)
 end
 
+-- attemptPedAttack(pedEntity, vehicleEntity, netId)
+-- returns true if the ped started an attack, false otherwise
+function attemptPedAttack(ped, veh, netId)
+  if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+
+  -- if it's player-controlled, don't try to force an attack
+  if IsPedAPlayer(ped) then return false end
+
+  -- get configurable attack chance (fallback to 0.5)
+  local attackChance = (Config and Config.Flee and Config.Flee.attackChance) or 0.5
+  if math.random() >= attackChance then
+    return false
+  end
+
+  -- try to obtain control of the ped
+  if NetworkGetEntityIsNetworked(ped) then
+    NetworkRequestControlOfEntity(ped)
+    local startT = GetGameTimer()
+    while not NetworkHasControlOfEntity(ped) and (GetGameTimer() - startT) < 1000 do
+      NetworkRequestControlOfEntity(ped)
+      Citizen.Wait(10)
+    end
+  else
+    SetEntityAsMissionEntity(ped, true, true)
+  end
+
+  -- clear tasks and prepare the ped
+  ClearPedTasksImmediately(ped)
+  SetBlockingOfNonTemporaryEvents(ped, true)
+  SetPedCanRagdoll(ped, false)
+
+  local playerPed = PlayerPedId()
+
+  -- If ped is in a vehicle, prefer shooting from vehicle for a short time
+  if IsPedInAnyVehicle(ped, false) then
+    -- try to equip a weapon if ped has none (best-effort, doesn't create new weapon)
+    if not HasPedGotWeapon(ped, GetHashKey("WEAPON_PISTOL"), false) then
+      GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
+    end
+    -- attempt to make them shoot at the player for a short duration
+    TaskShootAtEntity(ped, playerPed, 8000, 0) -- 8 seconds
+  else
+    -- on foot: make them attack the player
+    GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
+    TaskCombatPed(ped, playerPed, 0, 16)
+  end
+
+  -- mark in pedData that this ped attacked (helps other logic)
+  if netId then
+    pedData = pedData or {}
+    pedData[tostring(netId)] = pedData[tostring(netId)] or {}
+    pedData[tostring(netId)].attacked = true
+  end
+
+  dprint(("attemptPedAttack: ped=%s attacked (netId=%s)"):format(tostring(ped), tostring(netId)))
+  return true
+end
 
 local function spawnVehicleAndDriver(vehModelName, driverModelName, spawnCoords, heading)
   local vehHash = GetHashKey(vehModelName)
@@ -1772,7 +1829,125 @@ callAICoroner = function()
   if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
 end
 
+-- startFleeDrive(ped, veh)
+-- Makes `ped` drive away if they're in `veh`, otherwise makes them flee on foot.
+-- Returns true if a flee task was started, false if not.
+function startFleeDrive(ped, veh)
+  if not ped or ped == 0 or not DoesEntityExist(ped) then
+    dprint("startFleeDrive: invalid ped")
+    return false
+  end
 
+  local playerPed = PlayerPedId()
+
+  -- helper to request network control of an entity (best-effort)
+  local function requestControl(ent, timeout)
+    timeout = timeout or 1000
+    if not ent or ent == 0 or not DoesEntityExist(ent) then return false end
+    if NetworkGetEntityIsNetworked and NetworkGetEntityIsNetworked(ent) then
+      NetworkRequestControlOfEntity(ent)
+      local st = GetGameTimer()
+      while not NetworkHasControlOfEntity(ent) and (GetGameTimer() - st) < timeout do
+        NetworkRequestControlOfEntity(ent)
+        Citizen.Wait(10)
+      end
+      return NetworkHasControlOfEntity(ent)
+    else
+      -- locally owned entity: ensure it's mission entity so we can task it
+      SetEntityAsMissionEntity(ent, true, true)
+      return true
+    end
+  end
+
+  -- On-vehicle flee
+  if veh and veh ~= 0 and DoesEntityExist(veh) and IsPedInAnyVehicle(ped, false) then
+    dprint(("startFleeDrive: ped %s in vehicle %s - attempting drive away"):format(tostring(ped), tostring(veh)))
+
+    -- try to control vehicle and ped
+    requestControl(veh, 1200)
+    requestControl(ped, 800)
+
+    -- ensure vehicle is driveable for the task
+    SetVehicleEngineOn(veh, true, true, true)
+    SetVehicleUndriveable(veh, false)
+
+    -- Clear ped tasks then set keep task
+    ClearPedTasksImmediately(ped)
+    SetBlockingOfNonTemporaryEvents(ped, true)
+    SetPedKeepTask(ped, true)
+
+    -- compute a target coord roughly away from player to give the ped somewhere to drive to
+    local pedCoords = GetEntityCoords(ped)
+    local plCoords = GetEntityCoords(playerPed)
+    local dir = vector3(pedCoords.x - plCoords.x, pedCoords.y - plCoords.y, 0.0)
+    local dlen = math.sqrt(dir.x * dir.x + dir.y * dir.y)
+    if dlen < 1.0 then
+      -- if too close or same point, pick a forward vector from ped heading
+      local heading = GetEntityHeading(ped)
+      local hr = math.rad(heading)
+      dir = vector3(-math.sin(hr), math.cos(hr), 0.0)
+      dlen = 1.0
+    end
+    dir = vector3(dir.x / dlen, dir.y / dlen, 0.0)
+
+    -- compute distant target point (200m away) and a slight Z raise to avoid ground issues
+    local fleeDist = 200.0
+    local tx = pedCoords.x + dir.x * fleeDist
+    local ty = pedCoords.y + dir.y * fleeDist
+    local tz = pedCoords.z + 1.0
+
+    -- Task the ped to drive to the coord. Use a longrange variant if available.
+    local speed = 45.0   -- target cruising speed (tweak as desired)
+    local driveStyle = 786603 -- driving style flags (best-effort; tweak if you want calmer/aggressive)
+
+    -- Best-effort use TaskVehicleDriveToCoordLongrange if present, otherwise fallback to TaskVehicleDriveToCoord
+    if type(TaskVehicleDriveToCoordLongrange) == "function" then
+      TaskVehicleDriveToCoordLongrange(ped, veh, tx, ty, tz, speed, driveStyle, 1.0)
+    else
+      TaskVehicleDriveToCoord(ped, veh, tx, ty, tz, speed, 1.0, driveStyle, 5.0, true)
+    end
+
+    -- mark pedData so other logic knows this ped fled
+    pedData = pedData or {}
+    local nid = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or ped)
+    pedData[nid] = pedData[nid] or {}
+    pedData[nid].fled = true
+
+    dprint(("startFleeDrive: started vehicle flee for ped=%s -> target(%.1f,%.1f,%.1f)"):format(tostring(ped), tx, ty, tz))
+    return true
+  end
+
+  -- On-foot flee
+  if not IsPedInAnyVehicle(ped, false) then
+    dprint(("startFleeDrive: ped %s fleeing on foot"):format(tostring(ped)))
+
+    -- request control of ped
+    requestControl(ped, 800)
+
+    -- clear tasks and set flee attributes
+    ClearPedTasksImmediately(ped)
+    SetBlockingOfNonTemporaryEvents(ped, true)
+    SetPedFleeAttributes(ped, 2, true) -- keep fleeing
+    SetPedCanRagdoll(ped, true)
+    SetPedKeepTask(ped, true)
+
+    -- Prefer TaskSmartFleePed so ped runs away from player for a long time
+    local fleeDistance = 200.0
+    TaskSmartFleePed(ped, playerPed, fleeDistance, -1, false, false)
+
+    -- Mark pedData as fled
+    pedData = pedData or {}
+    local nid = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or ped)
+    pedData[nid] = pedData[nid] or {}
+    pedData[nid].fled = true
+
+    dprint(("startFleeDrive: started on-foot flee for ped=%s"):format(tostring(ped)))
+    return true
+  end
+
+  dprint("startFleeDrive: no action taken (ped not in vehicle and not valid)")
+  return false
+end
 
 callTow = function()
   local player = PlayerPedId()
@@ -1856,66 +2031,6 @@ local function getPrimaryOccupant(veh)
   return nil
 end
 
-local function attemptStopOnFoot(forceImmediate)
-  dprint("attemptStopOnFoot called, forceImmediate=", tostring(forceImmediate))
-  local player = PlayerPedId()
-  local coords = GetEntityCoords(player)
-  local ped, pedCoords
-
-  if lib and lib.getClosestPed then
-    ped, pedCoords = lib.getClosestPed(coords, 6.5)
-    if type(ped) == "table" and ped.ped then ped = ped.ped end 
-  else
-    local handle, candidate = FindFirstPed()
-    local ok = true
-    local bestDist, bestPed, bestCoords = 1e9, nil, nil
-    while ok do
-      if DoesEntityExist(candidate) and not IsPedAPlayer(candidate) then
-        local ccoords = GetEntityCoords(candidate)
-        local d = #(ccoords - coords)
-        if d < bestDist and d <= 6.5 then bestDist = d; bestPed = candidate; bestCoords = ccoords end
-      end
-      ok, candidate = FindNextPed(handle)
-    end
-    EndFindPed(handle)
-    ped, pedCoords = bestPed, bestCoords
-  end
-
-  if not ped or ped == 0 or DoesEntityExist(ped) == false then
-    dprint("attemptStopOnFoot: no ped found")
-    return notify("stop_no","Stop Failed","No nearby ped to stop.", 'error','person','')
-  end
-  if IsPedAPlayer(ped) then
-    dprint("attemptStopOnFoot: ped is player")
-    return notify("stop_player","Stop Failed","Target is a player. Use caution.", 'warning','person','')
-  end
-
-  local netId = safePedToNet(ped)
-  if not netId then
-    dprint("attemptStopOnFoot: PedToNet returned nil; using tostring(ped)")
-    netId = tostring(ped)
-  end
-
-  if not pedData[tostring(netId)] then
-    pedData[tostring(netId)] = generatePerson()
-    TriggerServerEvent('mdt:logID', tostring(netId), pedData[tostring(netId)])
-  end
-
-  lastPedNetId = tostring(netId)
-  lastPedEntity = ped   
-
-  setPedProtected(netId, true)
-  pedData[tostring(netId)].forcedStop = forceImmediate and true or false
-  pedData[tostring(netId)].pulledInVehicle = false
-
-  NetworkRequestControlOfEntity(ped)
-  SetEntityAsMissionEntity(ped, true, true)
-  SetBlockingOfNonTemporaryEvents(ped, true)
-  holdPedAttention(ped, false)
-
-  notify("stop_done","Stop","Ped stopped and detained on-foot." .. (forceImmediate and " (forced)" or ""), 'success','person','')
-end
-
 function attemptPullOverAI(forceImmediate)
   dprint("attemptPullOverAI called, forceImmediate=", tostring(forceImmediate))
   if not inEmergencyVehicle() then
@@ -1969,7 +2084,72 @@ do
         startFleeDrive(driver, pullVeh)
       end
     end
-    notify("pull_fail", Config.Messages.pull_fail.title, Config.Messages.pull_fail.text, Config.Messages.pull_fail.style)
+
+    
+    if DoesEntityExist(pullVeh) then
+      
+      if pullVehBlip and DoesBlipExist(pullVehBlip) then
+        RemoveBlip(pullVehBlip)
+        pullVehBlip = nil
+      end
+
+      pullVehBlip = AddBlipForEntity(pullVeh)
+      if DoesBlipExist(pullVehBlip) then
+        SetBlipSprite(pullVehBlip, 225)
+        SetBlipScale(pullVehBlip, 1.0)
+        SetBlipAsShortRange(pullVehBlip, false)
+        SetBlipColour(pullVehBlip, 1)
+        BeginTextCommandSetBlipName("STRING")
+        AddTextComponentString("Fleeing Vehicle")
+        EndTextCommandSetBlipName(pullVehBlip)
+      end
+
+      
+      notify("pull_fail", Config.Messages.pull_fail.title, Config.Messages.pull_fail.text, Config.Messages.pull_fail.style)
+      
+      notify("pull_fail_blip","Pull-Over","Target is fleeing! Blip placed on vehicle.",'error','car','')
+
+      
+      Citizen.CreateThread(function()
+        local startTime = GetGameTimer()
+        local maxDuration = 60000 
+        while true do
+          Citizen.Wait(1000)
+          if not pullVehBlip or not DoesBlipExist(pullVehBlip) then break end
+          if not DoesEntityExist(pullVeh) then
+            if pullVehBlip and DoesBlipExist(pullVehBlip) then
+              RemoveBlip(pullVehBlip)
+              pullVehBlip = nil
+            end
+            notify("pull_blip_removed","Pull-Over","Target vehicle lost (vehicle disappeared). Blip removed.",'inform')
+            break
+          end
+          local pcoords = GetEntityCoords(PlayerPedId())
+          local vcoords = GetEntityCoords(pullVeh)
+          local dist = #(pcoords - vcoords)
+          if dist > 500.0 then
+            if pullVehBlip and DoesBlipExist(pullVehBlip) then
+              RemoveBlip(pullVehBlip)
+              pullVehBlip = nil
+            end
+            notify("pull_blip_removed_far","Pull-Over","Target vehicle too far. Blip removed.",'inform')
+            break
+          end
+          if GetGameTimer() - startTime > maxDuration then
+            if pullVehBlip and DoesBlipExist(pullVehBlip) then
+              RemoveBlip(pullVehBlip)
+              pullVehBlip = nil
+            end
+            break
+          end
+        end
+      end)
+    else
+      
+      notify("pull_fail","Pull-Over","Target is fleeing!",'error')
+    end
+    
+
     pullVeh = nil
     return
   end
@@ -2062,7 +2242,18 @@ end
         monitorKeepInVehicle(occNet, pullVeh, 30000)
 
         TriggerEvent('__clientRequestPopulate')
-        notify("pull_done","Pull-Over","Vehicle slowed and pulled over. Occupant detained in-vehicle. Use vehicle menu to eject if needed.",'success','car-side','#38A169')
+                Citizen.Wait(200)
+
+      notify(
+        "pull_done",
+        "Pull-Over",
+        "Vehicle slowed and pulled over. Occupant detained in-vehicle. Press [Y] to reposition. Use vehicle menu to eject if needed.",
+        'success',
+        'car-side',
+        '#38A169',
+        15000 
+)
+
       else
         notify("pull_done_empty","Pull-Over","Vehicle pulled over, but no NPC occupant found.",'warning','car-side','#DD6B20')
       end
@@ -2077,37 +2268,48 @@ end
 end
 
 
+-- Robust repositionInteractive with diagnostics + multiple move attempts
 local function repositionInteractive(veh)
   if not veh or not DoesEntityExist(veh) then
     return notify("no_vehicle","No Vehicle","No pulled vehicle found.",'error','car-side','#E53E3E')
   end
 
-  
+  dprint("repositionInteractive: requesting control of vehicle " .. tostring(veh))
   NetworkRequestControlOfEntity(veh)
   local start = GetGameTimer()
-  while not NetworkHasControlOfEntity(veh) and (GetGameTimer() - start) < 1000 do
+  while not NetworkHasControlOfEntity(veh) and (GetGameTimer() - start) < 3000 do
     NetworkRequestControlOfEntity(veh)
     Citizen.Wait(10)
   end
+  local hasControl = NetworkHasControlOfEntity(veh)
+  if not hasControl then
+    notify("pull_repos_nocontrol","Reposition Notice","Could not obtain network control; entering local-only reposition mode. Changes may not persist.",'warning','arrows-spin','#DD6B20')
+    dprint("repositionInteractive: proceeding without network control (local-only).")
+  else
+    dprint("repositionInteractive: obtained network control for vehicle " .. tostring(veh))
+  end
 
-  
   local origCoords = GetEntityCoords(veh)
   local origHeading = GetEntityHeading(veh)
 
-  
   SetEntityAsMissionEntity(veh, true, true)
   SetVehicleEngineOn(veh, false, true, true)
   SetVehicleHandbrake(veh, true)
   SetVehicleDoorsLocked(veh, 2)
 
   notify("pull_repos_start","Reposition Mode",
-    "Use ARROW KEYS to move vehicle. HOLD LEFT SHIFT for fine moves. PRESS ENTER to confirm. PRESS ESC to cancel.",
+    "Use ARROW KEYS to move vehicle. Q/E rotate. HOLD LEFT SHIFT for fine moves. PRESS ENTER to confirm. PRESS ESC to cancel.",
     'inform','arrows-spin','#4299E1')
 
-  local step = 0.25         
-  local fineStep = 0.06     
+  local step = 0.25
+  local fineStep = 0.06
+  local rotStep = 2.0
+  local fineRotStep = 0.5
   local running = true
   local cancelled = false
+
+  -- debug state so we only log once per press
+  local debugState = { up = false, down = false, left = false, right = false }
 
   while running do
     Citizen.Wait(0)
@@ -2117,33 +2319,170 @@ local function repositionInteractive(veh)
       return
     end
 
-    
+    -- block Q/E from other scripts but still detect them via IsDisabledControlPressed
+    DisableControlAction(0, 44, true) -- Q
+    DisableControlAction(0, 46, true) -- E
+
     local curStep = step
-    if IsControlPressed(0,21) then 
+    local curRot = rotStep
+    if IsControlPressed(0, 21) then -- LEFT SHIFT
       curStep = fineStep
+      curRot = fineRotStep
+    end
+
+    -- ensure we have control before moving each tick (best-effort)
+    if not NetworkHasControlOfEntity(veh) then
+      NetworkRequestControlOfEntity(veh)
     end
 
     local pos = GetEntityCoords(veh)
-    local fwd = GetEntityForwardVector(veh)
-    local right = vector3(fwd.y, -fwd.x, 0)
+    local heading = GetEntityHeading(veh)
+    local hr = math.rad(heading)
+    local flatFwd = vector3(-math.sin(hr), math.cos(hr), 0.0)
+    local len = math.sqrt(flatFwd.x*flatFwd.x + flatFwd.y*flatFwd.y)
+    if len > 0.000001 then
+      flatFwd = vector3(flatFwd.x/len, flatFwd.y/len, 0.0)
+    else
+      flatFwd = vector3(0.0, 1.0, 0.0)
+      len = 1.0
+    end
+    local right = vector3(flatFwd.y, -flatFwd.x, 0.0)
 
-    
-    if IsControlPressed(0,172) then 
-      SetEntityCoordsNoOffset(veh, pos + fwd * curStep, false, false, false)
-    end
-    if IsControlPressed(0,173) then 
-      SetEntityCoordsNoOffset(veh, pos - fwd * curStep, false, false, false)
-    end
-    if IsControlPressed(0,174) then 
-      SetEntityCoordsNoOffset(veh, pos - right * curStep, false, false, false)
-    end
-    if IsControlPressed(0,175) then 
-      SetEntityCoordsNoOffset(veh, pos + right * curStep, false, false, false)
+    -- helper to check if the vehicle actually moved (returns distance moved)
+    local function movedDistance(oldCoords)
+      local now = GetEntityCoords(veh)
+      local dx = now.x - oldCoords.x
+      local dy = now.y - oldCoords.y
+      return math.sqrt(dx*dx + dy*dy)
     end
 
-    
-    if IsControlJustReleased(0,191) then
-      
+    -- function that tries multiple move methods and returns true if moved
+    local function tryMove(target)
+      -- 1) Try SetEntityCoordsNoOffset
+      SetEntityCoordsNoOffset(veh, target.x, target.y, target.z, false, false, false)
+      Citizen.Wait(0)
+      if movedDistance(pos) > 0.0005 then
+        return true, "SetEntityCoordsNoOffset"
+      end
+
+      -- 2) Try SetEntityCoords (with physics)
+      SetEntityCoords(veh, target.x, target.y, target.z, false, false, false, true)
+      Citizen.Wait(0)
+      if movedDistance(pos) > 0.0005 then
+        return true, "SetEntityCoords"
+      end
+
+      -- 3) Try toggling collision and move (last resort)
+      local hadCollision = true
+      -- best-effort read: assume it has collision
+      SetEntityCollision(veh, false, false)
+      SetEntityCoordsNoOffset(veh, target.x, target.y, target.z, false, false, false)
+      Citizen.Wait(0)
+      local moved = movedDistance(pos) > 0.0005
+      SetEntityCollision(veh, true, true)
+      if moved then
+        return true, "ToggleCollision+SetEntityCoordsNoOffset"
+      end
+
+      -- 4) As a final physics nudge, set a short velocity in direction, then zero it
+      SetEntityVelocity(veh, flatFwd.x * 5.0, flatFwd.y * 5.0, 0.0)
+      Citizen.Wait(50)
+      SetEntityVelocity(veh, 0.0, 0.0, 0.0)
+      if movedDistance(pos) > 0.0005 then
+        return true, "VelocityNudge"
+      end
+
+      return false, "AllFailed"
+    end
+
+    -- Movement input detection: check both normal and disabled controls so we catch input either way
+    local upPressed = IsControlPressed(0, 172) or IsDisabledControlPressed(0, 172)
+    local downPressed = IsControlPressed(0, 173) or IsDisabledControlPressed(0, 173)
+    local leftPressed = IsControlPressed(0, 174) or IsDisabledControlPressed(0, 174)
+    local rightPressed = IsControlPressed(0, 175) or IsDisabledControlPressed(0, 175)
+
+    -- UP
+    if upPressed then
+      local target = vector3(pos.x + flatFwd.x * curStep, pos.y + flatFwd.y * curStep, pos.z)
+      if not debugState.up then
+        dprint(("reposition: UP pressed | pos=(%.3f,%.3f,%.3f) | fwd=(%.3f,%.3f) | trying move to (%.3f,%.3f)"):format(
+          pos.x, pos.y, pos.z, flatFwd.x, flatFwd.y, target.x, target.y))
+        debugState.up = true
+      end
+      local ok, how = tryMove(target)
+      if ok then
+        dprint(("reposition: UP moved (method=%s)").format or ("reposition: UP moved (method="..tostring(how)..")"))
+      else
+        dprint(("reposition: UP move failed (reason=%s)"):format(tostring(how)))
+      end
+    else
+      debugState.up = false
+    end
+
+    -- DOWN
+    if downPressed then
+      local target = vector3(pos.x - flatFwd.x * curStep, pos.y - flatFwd.y * curStep, pos.z)
+      if not debugState.down then
+        dprint(("reposition: DOWN pressed | pos=(%.3f,%.3f) | fwd=(%.3f,%.3f)"):format(pos.x, pos.y, flatFwd.x, flatFwd.y))
+        debugState.down = true
+      end
+      local ok, how = tryMove(target)
+      if ok then
+        dprint(("reposition: DOWN moved (method=%s)"):format(tostring(how)))
+      else
+        dprint(("reposition: DOWN move failed (reason=%s)"):format(tostring(how)))
+      end
+    else
+      debugState.down = false
+    end
+
+    -- LEFT / RIGHT strafing
+    if leftPressed then
+      local target = vector3(pos.x - right.x * curStep, pos.y - right.y * curStep, pos.z)
+      if not debugState.left then
+        dprint(("reposition: LEFT pressed | pos=(%.3f,%.3f) | right=(%.3f,%.3f)"):format(pos.x, pos.y, right.x, right.y))
+        debugState.left = true
+      end
+      local ok, how = tryMove(target)
+      if ok then
+        dprint(("reposition: LEFT moved (method=%s)"):format(tostring(how)))
+      else
+        dprint(("reposition: LEFT move failed (reason=%s)"):format(tostring(how)))
+      end
+    else
+      debugState.left = false
+    end
+
+    if rightPressed then
+      local target = vector3(pos.x + right.x * curStep, pos.y + right.y * curStep, pos.z)
+      if not debugState.right then
+        dprint(("reposition: RIGHT pressed | pos=(%.3f,%.3f) | right=(%.3f,%.3f)"):format(pos.x, pos.y, right.x, right.y))
+        debugState.right = true
+      end
+      local ok, how = tryMove(target)
+      if ok then
+        dprint(("reposition: RIGHT moved (method=%s)"):format(tostring(how)))
+      else
+        dprint(("reposition: RIGHT move failed (reason=%s)"):format(tostring(how)))
+      end
+    else
+      debugState.right = false
+    end
+
+    -- Rotation handling (Q / E). Detect via disabled control so other scripts don't catch it
+    if IsDisabledControlPressed(0, 44) then -- Q
+      local h = GetEntityHeading(veh) - curRot
+      if h < 0 then h = h + 360 end
+      SetEntityHeading(veh, h)
+    end
+    if IsDisabledControlPressed(0, 46) then -- E
+      local h = GetEntityHeading(veh) + curRot
+      if h >= 360 then h = h - 360 end
+      SetEntityHeading(veh, h)
+    end
+
+    -- Confirm (ENTER) or alternative accept
+    if IsControlJustReleased(0,191) or IsControlJustReleased(0,201) then
       NetworkRequestControlOfEntity(veh)
       SetEntityAsMissionEntity(veh, true, true)
       SetVehicleOnGroundProperly(veh)
@@ -2155,7 +2494,7 @@ local function repositionInteractive(veh)
       break
     end
 
-    
+    -- Cancel (ESC)
     if IsControlJustReleased(0,200) then
       cancelled = true
       running = false
@@ -2164,7 +2503,6 @@ local function repositionInteractive(veh)
   end
 
   if cancelled then
-    
     NetworkRequestControlOfEntity(veh)
     local tryStart = GetGameTimer()
     while not NetworkHasControlOfEntity(veh) and (GetGameTimer() - tryStart) < 1000 do
@@ -2181,68 +2519,6 @@ local function repositionInteractive(veh)
   end
 end
 
-
-local function repositionPullVeh()
-  
-  local veh = pullVeh
-  if not veh or not DoesEntityExist(veh) then
-    veh = findVehicleAhead(20, 0.5)
-  end
-
-  if not veh or not DoesEntityExist(veh) then
-    return notify("no_vehicle","No Vehicle","No pulled vehicle found.",'error','car-side','#E53E3E')
-  end
-
-  
-  if lib and lib.showContext and lib.registerContext then
-    local ctx = {
-      id = 'reposition_confirm',
-      title = 'Reposition Pulled Vehicle?',
-      canClose = true,
-      options = {
-        { title = 'Yes — Reposition', icon = 'arrows-spin', onSelect = function() repositionInteractive(veh) end },
-        { title = 'No — Cancel', icon = 'ban', onSelect = function() notify("pull_repos_no","Cancelled","Reposition cancelled.",'inform','ban','#DD6B20') end },
-      }
-    }
-    pcall(function() lib.registerContext(ctx) end)
-    lib.showContext('reposition_confirm')
-    return
-  end
-
-  
-  if lib and lib.inputDialog then
-    local dlg = lib.inputDialog("Reposition Vehicle?", {
-      { type='input', label='Enter Y to reposition or N to cancel', default='Y/N' }
-    })
-    if dlg and type(dlg) == 'table' then
-      local val = tostring(dlg[1] or ""):lower()
-      if val:match("^%s*y") then
-        repositionInteractive(veh)
-      else
-        notify("pull_repos_no","Cancelled","Reposition cancelled.",'inform','ban','#DD6B20')
-      end
-      return
-    end
-  end
-
-  
-  DisplayOnscreenKeyboard(1, "FMMC_MPM_NA", "", "Reposition vehicle? (Y/N)", "", "", "", 1)
-  local tick = GetGameTimer() + 20000
-  while UpdateOnscreenKeyboard() == 0 and GetGameTimer() < tick do
-    Citizen.Wait(0)
-  end
-  local result = ""
-  if UpdateOnscreenKeyboard() ~= 2 then
-    local ok, res = pcall(function() return GetOnscreenKeyboardResult() end)
-    if ok and res then result = tostring(res) end
-  end
-  result = (result or ""):gsub("^%s+",""):gsub("%s+$",""):lower()
-  if result:match("^y") then
-    repositionInteractive(veh)
-  else
-    notify("pull_repos_no","Cancelled","Reposition cancelled.",'inform','ban','#DD6B20')
-  end
-end
 
 
 
@@ -2739,6 +3015,53 @@ end)
 
 
 
+RegisterNUICallback('createRecord', function(data, cb)
+  
+  TriggerServerEvent('mdt:createRecord', data)
+  cb('ok')
+end)
+
+
+RegisterNUICallback('listRecords', function(data, cb)
+  
+  TriggerServerEvent('mdt:listRecords', data)
+  cb('ok')
+end)
+
+
+
+
+RegisterNetEvent('mdt:recordsResult', function(records, target_type, target_value)
+  
+  if target_type == 'plate' then
+    lastPlateHistory = lastPlateHistory or {}
+    
+    if target_value and target_value ~= "" then
+      local found = false
+      for _, v in ipairs(lastPlateHistory) do if v == target_value then found = true; break end end
+      if not found then table.insert(lastPlateHistory, 1, target_value) end
+    end
+  else
+    lastIdHistory = lastIdHistory or {}
+    if target_value and target_value ~= "" then
+      local found = false
+      for _, v in ipairs(lastIdHistory) do if v == target_value then found = true; break end end
+      if not found then table.insert(lastIdHistory, 1, target_value) end
+    end
+  end
+
+  
+  SendNUIMessage({
+    action       = 'recordsResult',
+    records      = records or {},
+    target_type  = target_type or '',
+    target_value = target_value or ''
+  })
+
+  
+  print(('[mdt] forwarded %d MDT record(s) for %s=%s to NUI'):format((records and #records) or 0, tostring(target_type), tostring(target_value)))
+end)
+
 
 RegisterNUICallback('lookupPlate', function(data, cb)
   if data.plate and data.plate:match("%S+") then lastPlate = data.plate:upper() end
@@ -2858,6 +3181,17 @@ RegisterNetEvent('mdt:idResult', function(payload)
     end)
   end
 end)
+
+RegisterNetEvent('mdt:recordsResult')
+AddEventHandler('mdt:recordsResult', function(rows, targetType)
+  
+  SendNUIMessage({
+    action = 'recordsResult',
+    records = rows,
+    target_type = targetType
+  })
+end)
+
 
 RegisterNetEvent('mdt:reportsResult', function(records)
   SendNUIMessage({ action='reportsResult', records = records or {} })
@@ -2990,8 +3324,7 @@ RegisterCommand('cancelStopsCmd', function()
   cancelNonForcedStops()
 end)
 RegisterKeyMapping('cancelStopsCmd', 'Cancel stops (LEFT CTRL)', 'keyboard', 'LEFTCTRL')
-RegisterCommand('repositionVeh', repositionPullVeh)
-RegisterKeyMapping('repositionVeh','Reposition Pulled Vehicle','keyboard','Y')
+
 RegisterCommand('showid', function() if lastPedNetId then showIDSafely(lastPedNetId) else dprint("showid: no lastPedNetId") end end)
 RegisterKeyMapping('showid','Show Last Ped ID','keyboard','J')
 
@@ -3815,3 +4148,17 @@ RegisterCommand('forceAIMedicResponse', function()
 end, false)
 
 RegisterKeyMapping('debugDownedSearch', 'AI Debug: list downed peds near player', 'keyboard', '')
+
+
+
+-- put this once (near the bottom, after repositionInteractive is defined)
+RegisterCommand('repositionVeh', function()
+  dprint("repositionVeh keybind triggered, pullVeh=" .. tostring(pullVeh))
+  if pullVeh and DoesEntityExist(pullVeh) then
+    pcall(function() repositionInteractive(pullVeh) end)
+  else
+    notify("no_vehicle","No Vehicle","No pulled vehicle to reposition.",'error','car-side','#E53E3E')
+  end
+end, false)
+
+RegisterKeyMapping('repositionVeh', 'Reposition pulled vehicle', 'keyboard', 'Y')

@@ -14,232 +14,20 @@
   />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NCIC MDT - Police Terminal</title>
-
-  <style>
-    :root {
-      --bg: #0a1a25;              /* screen background */
-      --panel: #132736;           /* panels */
-      --glass: rgba(255,255,255,0.05);
-      --accent: #00ff8c;          /* neon MDT green */
-      --accent-dim: rgba(0,255,140,0.15);
-      --accent-glow: 0 0 10px rgba(0,255,140,0.3);
-      --muted: #8fb4b0;
-      --text: #d9f2ea;
-      --danger: #ff6b6b;
-      --warning: #ffc107;
-      --border: rgba(0,255,140,0.2);
-      --header-height: 70px;
-      --nav-width: 180px;
-    }
-
-    /* reset */
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: "Montserrat", "Arial", sans-serif;
-    }
-    
-    html, body {
-      height: 100%;
-      background: transparent;
-      color: var(--text);
-      -webkit-font-smoothing: antialiased;
-    }
-    
-    /* app container */
-    #app {
-      display: none; /* <-- keep hidden by default; .open will show it */
-      position: absolute;
-      left: 50%;
-      top: 5%;
-      transform: translateX(-50%);
-      width: 900px;
-      height: 700px;
-      border-radius: 8px;
-      background: var(--bg);
-      box-shadow: 0 10px 40px rgba(0,0,0,0.6), 
-                  inset 0 1px 0 rgba(255,255,255,0.05),
-                  0 0 0 1px rgba(0,255,140,0.1);
-      overflow: hidden;
-      z-index: 9999;
-      flex-direction: column;
-      user-select: none;
-      touch-action: none;
-      min-width: 480px;
-      min-height: 340px;
-      direction: ltr; /* prevents mirroring issues for the grip */
-    }
-    
-    #app.open {
-      display: flex; 
-      animation: mdtIn 0.3s ease-out;
-    }
-
-    /* top chrome / header */
-    header {
-      display: flex;
-      align-items: center;
-      height: var(--header-height);
-      padding: 0 20px;
-      background: rgba(0, 0, 0, 0.3);
-      border-bottom: 1px solid var(--border);
-      box-shadow: 0 2px 10px rgba(0,0,0,0.2);
-      cursor: grab;
-    }
-    header:active { cursor: grabbing; }
-
-    .brand { display:flex; align-items:center; gap:15px; }
-    .badge-icon {
-      width: 45px; height:45px; border-radius:6px;
-      background: linear-gradient(145deg,#012a3a,#003249);
-      display:flex; align-items:center; justify-content:center;
-      font-weight:900;color:var(--accent);font-size:14px;
-      border:1px solid rgba(255,255,255,0.05);
-      box-shadow: var(--accent-glow), inset 0 1px 0 rgba(255,255,255,0.05);
-    }
-    h1 { font-size:18px; letter-spacing:1px; color:var(--accent); text-transform:uppercase; font-weight:700; text-shadow:0 0 5px rgba(0,255,140,0.3) }
-    .sub { font-size:12px; color:var(--muted); margin-top:2px; letter-spacing:0.8px; }
-
-    .header-status { margin-left:auto; display:flex; align-items:center; gap:20px; color:var(--muted); font-size:13px; }
-    .dot { width:10px;height:10px;border-radius:50%;background:var(--accent);box-shadow:0 0 10px rgba(0,255,140,0.4); }
-    .header-status .field { display:flex; flex-direction:column; align-items:flex-end; }
-    .header-status .label { font-size:11px;color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:2px; }
-    .header-status .value { font-size:14px; color:var(--text); font-weight:700; }
-
-    /* close */
-    .close-btn {
-      margin-left: 15px;
-      background: transparent;
-      border: none;
-      color: var(--muted);
-      font-size: 20px;
-      cursor: pointer;
-      width: 30px;
-      height: 30px;
-      border-radius: 50%;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-    .close-btn:hover { background: rgba(255,107,107,0.1); color: var(--danger); }
-
-    /* layout */
-    .content { flex: 1; display: grid; grid-template-columns: var(--nav-width) 1fr; gap:0; min-height:0; }
-
-    /* nav */
-    nav { background: rgba(0,0,0,0.2); border-right:1px solid var(--border); padding:20px 0; display:flex; flex-direction:column; gap:5px; }
-    nav button {
-      appearance:none; text-align:left; padding:14px 20px; background:transparent;
-      color:var(--muted); border:none; border-left:4px solid transparent; cursor:pointer;
-      font-size:14px; text-transform:uppercase; letter-spacing:0.8px; font-weight:600;
-      display:flex; align-items:center; gap:12px; transition:all 0.15s ease; width:100%;
-    }
-    nav button .kbd { font-size:11px; color:rgba(255,255,255,0.2); margin-left:auto; padding:3px 6px; border-radius:3px; background:rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.05); }
-    nav button:hover { background: rgba(0,255,140,0.08); color: var(--accent); }
-    nav button.active { background: rgba(0,255,140,0.12); color:var(--accent); border-left-color:var(--accent); }
-
-    /* main area */
-    .pane { display:flex; flex-direction:column; gap:0; min-height:0; background: rgba(0,0,0,0.15); }
-    .controls { display:grid; grid-template-columns:1fr 1fr; gap:15px; background:var(--panel); padding:20px; border-bottom:1px solid var(--border); }
-    .form-group { display:flex; flex-direction:column; gap:8px; }
-    label { font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:0.8px; font-weight:600; }
-    input[type="text"], select, textarea {
-      background: rgba(0,0,0,0.3); border:1px solid rgba(255,255,255,0.08);
-      padding:12px; border-radius:4px; color:var(--text); font-size:14px; outline:none; transition:all .2s;
-    }
-    textarea { min-height:90px; resize:vertical; }
-    input[type="text"]::placeholder { color: rgba(191,238,224,0.3); }
-    input[type="text"]:focus, select:focus, textarea:focus { border-color:var(--accent); box-shadow:0 0 0 2px rgba(0,255,140,0.2); }
-    .controls .wide { grid-column:1 / -1; }
-    .btn { background: rgba(0,0,0,0.3); border:1px solid var(--accent); color:var(--accent); padding:12px; border-radius:4px; font-weight:700; text-transform:uppercase; letter-spacing:0.8px; cursor:pointer; width:100%; transition:all .2s; font-size:13px; }
-    .btn:hover { background: rgba(0,255,140,0.1); box-shadow: var(--accent-glow); }
-
-    .results { flex:1; display:flex; flex-direction:column; overflow:hidden; background: rgba(0,0,0,0.1); }
-    .results-header { display:flex; align-items:center; justify-content:space-between; padding:15px 20px; background: rgba(0,0,0,0.2); border-bottom:1px solid var(--border); }
-    .results-title { color:var(--accent); font-weight:700; letter-spacing:1px; font-size:16px; }
-    .status { font-weight:700; text-transform:uppercase; letter-spacing:0.8px; font-size:13px; padding:5px 10px; border-radius:4px; background: rgba(0,0,0,0.3); }
-
-    .record-grid { display:grid; grid-template-columns: repeat(2, 1fr); gap:15px; padding:15px; border-bottom:1px solid rgba(255,255,255,0.05); font-size:14px; color:var(--text); }
-    .record-grid.header { background: rgba(0,255,140,0.05); font-weight:700; color:var(--accent); border-bottom:1px solid var(--border); }
-    .record { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:15px; border-bottom:1px solid rgba(255,255,255,0.05); align-items:center; font-size:14px; transition:background .2s; }
-    .record:hover { background: rgba(255,255,255,0.03); }
-    .record-field { display:flex; flex-direction:column; }
-    .record-label { font-size:12px; color:var(--muted); text-transform:uppercase; margin-bottom:4px; font-weight:600; }
-    .record-value { font-weight:600; color:var(--text); }
-    .no-results { padding:40px; text-align:center; color:var(--muted); font-style:italic; }
-
-    .scroll { overflow:auto; padding:10px; -webkit-overflow-scrolling:touch; min-height:0; flex:1; }
-    .tiny-btn { padding:8px 12px; border-radius:4px; border:1px solid rgba(255,255,255,0.1); background:rgba(0,0,0,0.3); color:var(--muted); cursor:pointer; font-size:12px; transition:all .2s; }
-    .tiny-btn:hover { color:var(--accent); border-color:var(--accent); background:rgba(0,255,140,0.1); }
-
-    .panel { display:flex; flex-direction:column; height:100%; min-height:0; }
-    #reports-list,#warrants-list,#dispatch-list,#plate-status,#id-results { flex:1; min-height:0; overflow:auto; -webkit-overflow-scrolling:touch; }
-
-    .panel-form { padding:15px 20px; background: rgba(0,0,0,0.15); border-bottom:1px solid var(--border); }
-    .form-row { display:flex; gap:15px; margin-bottom:15px; }
-    .form-row:last-child { margin-bottom:0; }
-    .form-row .form-group { flex:1; }
-
-    @keyframes mdtIn { from { opacity:0; transform:translateX(-50%) translateY(-10px);} to { opacity:1; transform:translateX(-50%) translateY(0);} }
-
-    .status.valid, .status.active, .status.clear { color:var(--accent); background:rgba(0,255,140,0.1); border:1px solid rgba(0,255,140,0.2); }
-    .status.stolen, .status.wanted, .status.suspended { color:var(--danger); background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.2); }
-    .status.expired, .status.pending { color:var(--warning); background:rgba(255,193,7,0.1); border:1px solid rgba(255,193,7,0.2); }
-
-    /* Resize grip (bottom-right inside #app) */
-    .resize-grip {
-      position: absolute;
-      right: 10px;
-      bottom: 10px;
-      width: 22px;
-      height: 22px;
-      cursor: nwse-resize;
-      display:flex;
-      align-items:center;
-      justify-content:center;
-      z-index: 10001;
-      pointer-events: auto;
-    }
-    .resize-grip .bars { width:14px; height:14px; position:relative; }
-    .resize-grip .bars::before, .resize-grip .bars::after, .resize-grip .bars div {
-      content:""; position:absolute; right:0; bottom:0; width:10px; height:2px; background: rgba(191,238,224,0.18); transform: rotate(-45deg); border-radius:2px;
-    }
-    .resize-grip .bars::after { bottom:6px; width:7px; opacity:0.8; }
-    .resize-grip .bars div { bottom:11px; width:4px; opacity:0.6; }
-
-    /* tooltip (uses data-tooltip attribute) */
-    [data-tooltip] { position: relative; }
-    [data-tooltip]::after {
-      content: attr(data-tooltip);
-      position: absolute;
-      white-space: nowrap;
-      font-size: 12px;
-      padding: 6px 8px;
-      border-radius: 4px;
-      background: rgba(2,8,10,0.96);
-      color: var(--text);
-      top: calc(100% + 8px);
-      left: 50%;
-      transform: translateX(-50%) translateY(6px);
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity .12s ease, transform .12s ease;
-      box-shadow: 0 6px 20px rgba(0,0,0,0.6);
-      z-index: 10002;
-      border: 1px solid rgba(255,255,255,0.03);
-    }
-    [data-tooltip]:hover::after { opacity: 1; transform: translateX(-50%) translateY(0); }
-
-    /* accessibility focus for grip */
-    .resize-grip:focus { outline: none; box-shadow: 0 0 0 3px rgba(0,255,140,0.12); border-radius: 4px; }
-
-    /* responsive adjustments */
-    @media (max-width: 950px) {
-      #app { left:50%; transform:translateX(-50%); width:95%; height:85vh; }
-      .content { grid-template-columns: 160px 1fr; }
-    }
-  </style>
+<link rel="stylesheet" href="styles.css">
+<style>
+/* Minimal styles to support collapsible record details */
+.record { border-radius:8px; padding:8px; margin:8px 0; background: #0b1012; border:1px solid rgba(255,255,255,0.03); display:block; }
+.record .record-summary { display:flex; gap:12px; align-items:center; justify-content:space-between; cursor:pointer; }
+.record .record-left { display:flex; gap:12px; align-items:center; }
+.record .record-label { font-size:11px; color:var(--muted); }
+.record .record-value { font-weight:600; font-size:13px; color:var(--text); }
+.record .record-details { display:none; margin-top:10px; padding-top:8px; border-top:1px dashed rgba(255,255,255,0.03); color:var(--muted); }
+.record.open .record-details { display:block; }
+.record .toggle-icon { width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border-radius:6px; background:rgba(255,255,255,0.02); color:var(--muted); font-size:12px; }
+.results-title.small { font-size:12px; margin-bottom:6px; }
+.tiny-meta { font-size:12px; color:var(--muted); }
+</style>
 </head>
 <body>
   <div id="app" role="application" aria-label="NCIC MDT">
@@ -256,6 +44,7 @@
         <div style="display:flex;align-items:center;gap:10px">
           <div class="dot" title="Connection"></div>
           <div class="small muted">ONLINE</div>
+
         </div>
 
         <div class="field">
@@ -322,7 +111,8 @@
           <section id="panel-plate" class="panel active" style="display:flex;flex-direction:column;height:100%">
             <div class="results-header">
               <div class="results-title">VEHICLE REGISTRATION RECORD</div>
-              <div id="plate-status-indicator" class="status small">--</div>
+              <button class="btn-compose tiny-btn" data-tooltip="Compose record (C)">Compose</button>
+              <div id="id-status-indicator" class="status small">--</div>
             </div>
 
             <div id="plate-status" class="scroll">
@@ -334,6 +124,8 @@
           <section id="panel-id" class="panel" style="display:none;flex-direction:column;height:100%">
             <div class="results-header">
               <div class="results-title">IDENTITY RECORD</div>
+              <!-- Compose button (use class btn-compose) -->
+              <button class="btn-compose tiny-btn" data-tooltip="Compose record (C)">Compose</button>
               <div id="id-status-indicator" class="status small">--</div>
             </div>
 
@@ -365,7 +157,7 @@
                   </select>
                 </div>
               </div>
-              
+
               <div class="form-group">
                 <label for="report-desc">Description</label>
                 <textarea id="report-desc" placeholder="Description..." data-tooltip="Describe the incident"></textarea>
@@ -400,7 +192,7 @@
                   <input id="warrant-netid" type="text" placeholder="NetID" data-tooltip="Optional NetID" />
                 </div>
               </div>
-              
+
               <div class="form-group">
                 <label for="warrant-charges">Charges / Details</label>
                 <textarea id="warrant-charges" placeholder="Charges / details..." data-tooltip="Charges or details for the warrant"></textarea>
@@ -408,7 +200,7 @@
 
               <div style="display:flex;gap:10px;margin-top:10px">
                 <button id="btn-create-warrant" class="btn" style="flex:1" data-tooltip="Create a warrant">Create Warrant</button>
-                <button id="btn-list-warrants" class="btn" style="flex:1" data-tooltip="Refresh warrants list">List Warrants</button>
+                <button id="btn-list-warrants" class="btn" style="flex:1" data-tooltip="List Warrants">List Warrants</button>
               </div>
             </div>
 
@@ -435,7 +227,7 @@
                   <input id="dispatch-location" type="text" placeholder="Location" data-tooltip="Location of the call" />
                 </div>
               </div>
-              
+
               <div class="form-group">
                 <label for="dispatch-message">Message</label>
                 <textarea id="dispatch-message" placeholder="Message..." data-tooltip="Call details"></textarea>
@@ -454,6 +246,64 @@
         </div>
       </div>
     </div>
+<!-- Compose Modal container (hidden by default) -->
+<div id="compose-modal-backdrop" style="display:none;position:fixed;inset:0;z-index:100000;background:rgba(2,8,10,0.75);align-items:center;justify-content:center;">
+  <div id="compose-modal" style="width:640px;max-width:95%;border-radius:8px;background:var(--panel);box-shadow:0 10px 40px rgba(0,0,0,0.6);padding:18px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="display:flex;flex-direction:column">
+        <div style="color:var(--accent);font-weight:700">Compose Record</div>
+        <div style="color:var(--muted);font-size:12px">Create Arrest / Ticket / Note linked to a plate or ID</div>
+      </div>
+      <div>
+        <button id="compose-close" class="tiny-btn">Close</button>
+      </div>
+    </div>
+
+    <div class="panel-form" style="padding:12px;background:transparent;border:none">
+      <div style="display:flex;gap:10px;margin-bottom:8px">
+        <div style="flex:1">
+          <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Record Type</label>
+          <select id="compose-type" style="width:100%;padding:10px;border-radius:4px">
+            <option value="arrest">Arrest</option>
+            <option value="ticket">Ticket</option>
+            <option value="note">Note</option>
+          </select>
+        </div>
+
+        <div style="width:180px">
+          <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Target</label>
+          <select id="compose-target-type" style="width:100%;padding:10px;border-radius:4px">
+            <option value="plate">Plate</option>
+            <option value="netid">NetID</option>
+            <option value="name">Name</option>
+          </select>
+        </div>
+      </div>
+
+      <div style="margin-bottom:8px">
+        <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Target Value (plate / netId / name)</label>
+        <input id="compose-target-value" type="text" style="width:100%;padding:10px;border-radius:4px" placeholder="e.g. ABC123 / 23 / John Doe" />
+      </div>
+
+      <div style="margin-bottom:8px">
+        <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Title</label>
+        <input id="compose-title" type="text" style="width:100%;padding:10px;border-radius:4px" placeholder="Short title (e.g. 'Misdemeanor arrest')" />
+      </div>
+
+      <div style="margin-bottom:12px">
+        <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Description</label>
+        <textarea id="compose-desc" style="width:100%;padding:10px;border-radius:4px" placeholder="Full description..."></textarea>
+      </div>
+
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button id="compose-submit" class="btn">Save Record</button>
+        <button id="compose-cancel" class="tiny-btn">Cancel</button>
+      </div>
+
+      <div id="compose-meta" style="margin-top:10px;color:var(--muted);font-size:12px"></div>
+    </div>
+  </div>
+</div>
 
     <!-- bottom-right resize grip -->
     <div class="resize-grip" id="resizeGrip" title="Drag to resize" data-tooltip="Drag to resize window" tabindex="0">
@@ -471,7 +321,7 @@
     // -----------------------
     const LAYOUT_KEY = 'ncic_mdt_layout_v2';
     function setCookie(name, value, days=365){ try { const d=new Date(); d.setTime(d.getTime() + (days*24*60*60*1000)); document.cookie = name + "=" + encodeURIComponent(value) + ";expires=" + d.toUTCString() + ";path=/"; } catch(e){} }
-    function getCookie(name){ try { const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)'); return m ? decodeURIComponent(m.pop()) : null; } catch(e){return null} }
+    function getCookie(name){ try { const m = document.cookie.match('(^|;)\s*' + name + '\s*=\s*([^;]+)'); return m ? decodeURIComponent(m.pop()) : null; } catch(e){return null} }
     function saveLayoutState(state){ try{ localStorage.setItem(LAYOUT_KEY, JSON.stringify(state)); }catch(e){} try{ setCookie(LAYOUT_KEY, JSON.stringify(state), 365);}catch(e){} }
     function loadLayoutState(){ try{ const s = localStorage.getItem(LAYOUT_KEY); if(s) return JSON.parse(s); const c = getCookie(LAYOUT_KEY); if(c) return JSON.parse(c); }catch(e){} return null; }
 
@@ -566,7 +416,11 @@
     // Plate lookup
     if (btnPlate) btnPlate.onclick = () => {
       const plate = (plateInput.value || '').trim();
-      if (plate) sendUI('lookupPlate', { plate });
+      if (plate) {
+        sendUI('lookupPlate', { plate });
+        // also request MDT saved records linked to this plate
+        sendUI('listRecords', { target_type: 'plate', target_value: plate });
+      }
     };
 
     // ID lookup (NetID or "First Last")
@@ -578,8 +432,14 @@
       }
       if (v.indexOf(' ') !== -1) {
         sendUI('lookupID', { name: v });
+        // request MDT records saved by name, but also look up 'plate' and 'netid' for tolerance
+        sendUI('listRecords', { target_type: 'name', target_value: v });
+        sendUI('listRecords', { target_type: 'plate', target_value: v });
+        sendUI('listRecords', { target_type: 'netid', target_value: v });
       } else {
         sendUI('lookupID', { netId: v });
+        sendUI('listRecords', { target_type: 'netid', target_value: v });
+        sendUI('listRecords', { target_type: 'name', target_value: v });
       }
     };
 
@@ -589,6 +449,7 @@
       if (v) {
         plateInput.value = v;
         sendUI('lookupPlate', { plate: v });
+        sendUI('listRecords', { target_type: 'plate', target_value: v });
       }
     };
 
@@ -596,8 +457,13 @@
       const v = idHistorySel.value;
       if (!v) return;
       idInput.value = v;
-      if (v.indexOf(' ') !== -1) sendUI('lookupID', { name: v });
-      else sendUI('lookupID', { netId: v });
+      if (v.indexOf(' ') !== -1) {
+        sendUI('lookupID', { name: v });
+        sendUI('listRecords', { target_type: 'name', target_value: v });
+      } else {
+        sendUI('lookupID', { netId: v });
+        sendUI('listRecords', { target_type: 'netid', target_value: v });
+      }
     };
 
     // Reports actions
@@ -748,7 +614,122 @@
       });
     }
 
-    // delegated click handlers (delete/ack)
+    // MDT records render helpers (added to show mdt_id_records results) with collapsible details
+    function renderMDTRecordsForPlate(records) {
+      if (!plateStatus) return;
+      // remove previous MDT records container if present
+      const existing = plateStatus.querySelector('.mdt-records-container');
+      if (existing) existing.remove();
+
+      const container = document.createElement('div');
+      container.className = 'mdt-records-container';
+      container.style.marginTop = '12px';
+      container.innerHTML = `<div class="results-title small">MDT - Saved Records</div>`;
+      if (!records || records.length === 0) {
+        const nr = document.createElement('div'); nr.className='no-results'; nr.textContent='No MDT records for this plate.'; container.appendChild(nr);
+      } else {
+        records.forEach(r => {
+          const rec = document.createElement('div'); rec.className = 'record';
+          // summary area (clickable)
+          const title = r.title || r.rtype || '(no title)';
+          const ts = r.timestamp || '';
+          const creator = r.creator_identifier || r.creator_discord || '';
+          const tv = r.target_value || '';
+          rec.innerHTML = `
+            <div class="record-summary" data-record-id="${escapeHtml(r.id || '')}">
+              <div class="record-left">
+                <div style="display:flex;flex-direction:column">
+                  <div class="record-label">TYPE</div>
+                  <div class="record-value">${escapeHtml(title)}</div>
+                </div>
+                <div style="display:flex;flex-direction:column">
+                  <div class="record-label">DATE</div>
+                  <div class="tiny-meta">${escapeHtml(ts)}</div>
+                </div>
+                <div style="display:flex;flex-direction:column">
+                  <div class="record-label">TARGET</div>
+                  <div class="tiny-meta">${escapeHtml(r.target_type || '')}: ${escapeHtml(tv)}</div>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="tiny-meta" style="margin-right:8px">Saved by: ${escapeHtml(creator)}</div>
+                <div class="toggle-icon" data-action="toggle-record" data-id="${escapeHtml(r.id || '')}" title="Expand/Collapse">▸</div>
+              </div>
+            </div>
+            <div class="record-details" data-record-id="${escapeHtml(r.id || '')}">
+              <div style="padding-bottom:6px"><strong>Description</strong></div>
+              <div style="white-space:pre-wrap;">${escapeHtml(r.description || '')}</div>
+              <div style="height:8px"></div>
+              <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
+                <div><span class="record-label">Creator</span><div class="tiny-meta">${escapeHtml(r.creator_identifier || r.creator_discord || '')}</div></div>
+                <div><span class="record-label">Record ID</span><div class="tiny-meta">${escapeHtml(r.id || '')}</div></div>
+              </div>
+            </div>
+          `;
+          container.appendChild(rec);
+        });
+      }
+      plateStatus.appendChild(container);
+    }
+
+    function renderMDTRecordsForID(records) {
+      if (!idResults) return;
+      // remove previous MDT records container if present
+      const existing = idResults.querySelector('.mdt-records-container');
+      if (existing) existing.remove();
+
+      const container = document.createElement('div');
+      container.className = 'mdt-records-container';
+      container.style.marginTop = '12px';
+      container.innerHTML = `<div class="results-title small">MDT - Saved Records</div>`;
+      if (!records || records.length === 0) {
+        const nr = document.createElement('div'); nr.className='no-results'; nr.textContent='No MDT records for this subject.'; container.appendChild(nr);
+      } else {
+        records.forEach(r => {
+          const rec = document.createElement('div'); rec.className = 'record';
+          const title = r.title || r.rtype || '(no title)';
+          const ts = r.timestamp || '';
+          const creator = r.creator_identifier || r.creator_discord || '';
+          const tv = r.target_value || '';
+          rec.innerHTML = `
+            <div class="record-summary" data-record-id="${escapeHtml(r.id || '')}">
+              <div class="record-left">
+                <div style="display:flex;flex-direction:column">
+                  <div class="record-label">TYPE</div>
+                  <div class="record-value">${escapeHtml(title)}</div>
+                </div>
+                <div style="display:flex;flex-direction:column">
+                  <div class="record-label">DATE</div>
+                  <div class="tiny-meta">${escapeHtml(ts)}</div>
+                </div>
+                <div style="display:flex;flex-direction:column">
+                  <div class="record-label">TARGET</div>
+                  <div class="tiny-meta">${escapeHtml(r.target_type || '')}: ${escapeHtml(tv)}</div>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <div class="tiny-meta" style="margin-right:8px">Saved by: ${escapeHtml(creator)}</div>
+                <div class="toggle-icon" data-action="toggle-record" data-id="${escapeHtml(r.id || '')}" title="Expand/Collapse">▸</div>
+              </div>
+            </div>
+            <div class="record-details" data-record-id="${escapeHtml(r.id || '')}">
+              <div style="padding-bottom:6px"><strong>Description</strong></div>
+              <div style="white-space:pre-wrap;">${escapeHtml(r.description || '')}</div>
+              <div style="height:8px"></div>
+              <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:8px">
+                <div><span class="record-label">Creator</span><div class="tiny-meta">${escapeHtml(r.creator_identifier || r.creator_discord || '')}</div></div>
+                <div><span class="record-label">Record ID</span><div class="tiny-meta">${escapeHtml(r.id || '')}</div></div>
+                <div><span class="record-label">Raw Target</span><div class="tiny-meta">${escapeHtml(r.target_value || '')}</div></div>
+              </div>
+            </div>
+          `;
+          container.appendChild(rec);
+        });
+      }
+      idResults.appendChild(container);
+    }
+
+    // delegated click handlers (delete/ack/toggle)
     document.body.addEventListener('click', function (ev) {
       const t = ev.target;
       if (!t || !t.dataset) return;
@@ -768,7 +749,25 @@
         sendUI('ackDispatch', { id });
         setTimeout(() => sendUI('listDispatch', {}), 200);
       }
-    });
+      if (t.dataset.action === 'toggle-record' || t.classList.contains('record-summary')) {
+        // find surrounding record element
+        let rec = t;
+        // if clicked the summary inner element, walk up to the .record
+        while (rec && !rec.classList.contains('record')) rec = rec.parentNode;
+        if (!rec) return;
+        // toggle open class
+        if (rec.classList.contains('open')) {
+          rec.classList.remove('open');
+          // update toggle icon(s)
+          const icons = rec.querySelectorAll('.toggle-icon');
+          icons.forEach(ic => ic.textContent = '▸');
+        } else {
+          rec.classList.add('open');
+          const icons = rec.querySelectorAll('.toggle-icon');
+          icons.forEach(ic => ic.textContent = '▾');
+        }
+      }
+    }, true);
 
     // NUI messages
     window.addEventListener('message', evt => {
@@ -909,6 +908,32 @@
           d.records.forEach(r => {
             const display = ((r.first_name || '') + (r.last_name ? ' ' + r.last_name : '')).trim() ||
               r.netId || r.identifier || '';
+            if (display && !seen.has(display)) {
+              seen.add(display);
+              const o = document.createElement('option');
+              o.value = display;
+              o.textContent = display;
+              idHistorySel.appendChild(o);
+            }
+          });
+        }
+      }
+
+      // mdt created records result
+      if (d.action === 'recordsResult') {
+        const recs = d.records || d.result || [];
+        const ttype = d.target_type || d.targetType || '';
+        if (ttype === 'plate') {
+          renderMDTRecordsForPlate(recs);
+        } else {
+          renderMDTRecordsForID(recs);
+        }
+
+        // populate history dropdown for idHistory if possible
+        if (Array.isArray(recs) && recs.length > 0 && idHistorySel) {
+          const seen = new Set(Array.from(idHistorySel.options).map(o => o.value));
+          recs.forEach(r => {
+            const display = (r.target_value || (r.first_name ? (r.first_name + (r.last_name ? ' ' + r.last_name : '')) : r.netId || r.identifier || ''));
             if (display && !seen.has(display)) {
               seen.add(display);
               const o = document.createElement('option');
@@ -1166,5 +1191,223 @@
     if (grip) grip.style.left = 'auto'; // force left auto so right placement is used
   })();
 </script>
+
+<!-- Compose handler script: attaches compose buttons, opens modal, sends createRecord -->
+<script>
+(function(){
+  const modalBackdrop = document.getElementById('compose-modal-backdrop');
+  const btns = Array.from(document.querySelectorAll('.btn-compose'));
+  const closeBtn = document.getElementById('compose-close');
+  const cancelBtn = document.getElementById('compose-cancel');
+  const submitBtn = document.getElementById('compose-submit');
+
+  const ctType = document.getElementById('compose-type');
+  const ctTargetType = document.getElementById('compose-target-type');
+  const ctTargetValue = document.getElementById('compose-target-value');
+  const ctTitle = document.getElementById('compose-title');
+  const ctDesc = document.getElementById('compose-desc');
+  const ctMeta = document.getElementById('compose-meta');
+
+  if (!modalBackdrop) {
+    console.warn('[NCIC] compose modal missing: #compose-modal-backdrop');
+    return;
+  }
+
+  function openCompose(prefillTargetType, prefillTargetValue) {
+    if (prefillTargetType && ctTargetType) ctTargetType.value = prefillTargetType;
+    if (prefillTargetValue && ctTargetValue) ctTargetValue.value = prefillTargetValue;
+    if (window._ncic_creator_identifier) {
+      ctMeta.textContent = 'Creator: ' + window._ncic_creator_identifier + (window._ncic_creator_discord ? (' ('+window._ncic_creator_discord+')') : '');
+    } else {
+      ctMeta.textContent = '';
+    }
+    modalBackdrop.style.display = 'flex';
+    setTimeout(()=>{ if(ctTitle) ctTitle.focus(); }, 50);
+  }
+  function closeCompose() {
+    modalBackdrop.style.display = 'none';
+  }
+
+  if (btns && btns.length) {
+    btns.forEach(b => b.addEventListener('click', ()=> {
+      const plateVisible = (document.getElementById('panel-plate') || {}).style.display !== 'none';
+      const idVisible = (document.getElementById('panel-id') || {}).style.display !== 'none';
+      const plateVal = (document.getElementById('plate-input') || {}).value || '';
+      const idVal = (document.getElementById('id-input') || {}).value || '';
+      if (plateVisible && plateVal.trim()) openCompose('plate', plateVal.trim());
+      else if (idVisible && idVal.trim()) openCompose('name', idVal.trim());
+      else openCompose('plate', plateVal.trim() || idVal.trim() || '');
+    }));
+  } else {
+    console.warn('[NCIC] no .btn-compose found');
+  }
+
+  if (closeBtn) closeBtn.addEventListener('click', closeCompose);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeCompose);
+
+  modalBackdrop.addEventListener('click', (ev) => {
+    if (ev.target === modalBackdrop) closeCompose();
+  });
+
+  if (submitBtn) submitBtn.addEventListener('click', ()=>{
+    const target_type = (ctTargetType && ctTargetType.value) || 'plate';
+    const target_value = ((ctTargetValue && ctTargetValue.value) || '').trim();
+    const rtype = (ctType && ctType.value) || 'note';
+    const title = ((ctTitle && ctTitle.value) || '').trim();
+    const description = ((ctDesc && ctDesc.value) || '').trim();
+
+    if (!target_value || !title || !description) {
+      return alert('Target, title and description are required.');
+    }
+
+    const payload = {
+      target_type,
+      target_value,
+      rtype,
+      title,
+      description,
+      creator_identifier: window._ncic_creator_identifier || '',
+      creator_discord: window._ncic_creator_discord || ''
+    };
+
+    try {
+      if (typeof window._ncic_sendUI === 'function') {
+        window._ncic_sendUI('createRecord', payload);
+      } else {
+        try { fetch(`https://${GetParentResourceName()}/createRecord`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) }); } catch(e){}
+      }
+    } catch (e) {
+      console.error('[NCIC] createRecord send error', e);
+    }
+
+    closeCompose();
+
+    setTimeout(() => {
+      if (typeof window._ncic_sendUI === 'function') window._ncic_sendUI('listRecords', { target_type, target_value });
+    }, 250);
+  });
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modalBackdrop.style.display === 'flex') closeCompose();
+  });
+})();
+</script>
+
+
+<!-- MDT recordsResult & id/plate result renderer - inserted by ChatGPT -->
+<script>
+(function(){
+  function escapeHtml(s){ if (s===null||s===undefined) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
+
+  function renderRecordsToContainer(records, container, headerHtml){
+    if (!container) return;
+    container.innerHTML = '';
+    if (headerHtml) {
+      const h = document.createElement('div');
+      h.className = 'results-subheader';
+      h.innerHTML = headerHtml;
+      container.appendChild(h);
+    }
+    if (!records || records.length === 0) {
+      const no = document.createElement('div');
+      no.className = 'no-results';
+      no.textContent = 'No MDT records for this subject.';
+      container.appendChild(no);
+      return;
+    }
+
+    records.forEach(r => {
+      const rec = r || {};
+      const box = document.createElement('div');
+      box.className = 'record-item';
+      box.style.padding = '8px';
+      box.style.margin = '8px 0';
+      box.style.borderTop = '1px solid rgba(255,255,255,0.03)';
+      box.style.background = 'transparent';
+
+      const dt = rec.timestamp || rec.time || rec.date || '';
+      const type = rec.rtype || rec.type || rec.record_type || rec.target_type || '--';
+      const title = rec.title || rec.first_name || rec.name || '';
+      const desc = rec.description || rec.desc || rec.details || '';
+      const creator = rec.creator_identifier || rec.creator || rec.creator_discord || rec.identifier || '';
+
+      let inner = '<div style="display:flex;justify-content:space-between;align-items:flex-start">';
+      inner += '<div style="font-size:12px;color:#9adbb6">'+escapeHtml(dt)+'</div>';
+      inner += '<div style="font-size:12px;color:#8ef6b1">TYPE<br/><strong>'+escapeHtml(type)+'</strong></div>';
+      inner += '<div style="font-size:12px;color:#9adbb6">Creator:<br/>'+escapeHtml(creator)+'</div>';
+      inner += '</div>';
+
+      if (title && title !== '') inner += '<div style="font-weight:700;margin-top:6px;color:#9adbb6">'+escapeHtml(title)+'</div>';
+      if (desc && desc !== '') inner += '<div style="margin-top:6px;color:#9adbb6">'+escapeHtml(desc)+'</div>';
+
+      // show other keys
+      const skip = new Set(['id','target_type','target_value','rtype','type','title','description','desc','creator_identifier','creator','creator_discord','creatorDiscord','timestamp','time','date','first_name','last_name','identifier','netId']);
+      const otherKeys = Object.keys(rec).filter(k => !skip.has(k) && rec[k] !== null && rec[k] !== undefined && String(rec[k]).trim() !== '');
+      if (otherKeys.length > 0) {
+        inner += '<div style="margin-top:8px;font-size:12px;color:#9adbb6">Additional Info:</div><ul style="margin:6px 0 0 16px;color:#9adbb6">';
+        otherKeys.forEach(k => {
+          inner += '<li><strong>'+escapeHtml(k)+':</strong> '+escapeHtml(String(rec[k]))+'</li>';
+        });
+        inner += '</ul>';
+      }
+
+      box.innerHTML = inner;
+      container.appendChild(box);
+    });
+  }
+
+  window.addEventListener('message', function(event){
+    const d = event.data;
+    if (!d || !d.action) return;
+
+    // Normalize records from various payloads
+    let records = [];
+    let target_type = null;
+    let headerHtml = '';
+
+    if (d.action === 'recordsResult') {
+      records = d.records || d.result || d.data || d || [];
+      target_type = d.target_type || d.targetType || null;
+    } else if (d.action === 'idResult') {
+      // d may contain: { action:'idResult', netId, name, licenseStatus, records: [...] }
+      records = d.records || [];
+      target_type = 'name';
+      headerHtml = '<div class="id-header"><strong>Name:</strong> '+escapeHtml(d.name||'')+' &nbsp; <strong>License:</strong> '+escapeHtml(d.licenseStatus||'')+'</div>';
+    } else if (d.action === 'plateResult') {
+      // d may contain: { action:'plateResult', plate, status, records: [...] }
+      records = d.records || d.records || d.data || [];
+      target_type = 'plate';
+      headerHtml = '<div class="plate-header"><strong>Plate:</strong> '+escapeHtml(d.plate||'')+' &nbsp; <strong>Status:</strong> '+escapeHtml(d.status||'')+'</div>';
+    } else {
+      // ignore other actions
+      return;
+    }
+
+    // If records is an object with nested array, try common keys
+    if (!Array.isArray(records) && typeof records === 'object') {
+      const tryKeys = ['records','data','rows','result','mdt_id_records','mdt_id_record'];
+      for (const k of tryKeys){
+        if (Array.isArray(records[k])) { records = records[k]; break; }
+      }
+    }
+
+    if (!Array.isArray(records) && Array.isArray(d)) records = d;
+
+    // Decide container: plate -> #plate-status, otherwise #id-results
+    let container = null;
+    if (target_type === 'plate' || (d.action === 'plateResult')) {
+      container = document.querySelector('#plate-status') || document.querySelector('#panel-plate .scroll') || document.querySelector('.panel#panel-plate .scroll');
+    } else {
+      container = document.querySelector('#id-results') || document.querySelector('#panel-id .scroll') || document.querySelector('.panel#panel-id .scroll');
+    }
+
+    // As a fallback try generic results container
+    if (!container) container = document.querySelector('.results') || document.querySelector('.results .scroll');
+
+    renderRecordsToContainer(records, container, headerHtml);
+  });
+})();
+</script>
+<!-- end inserted renderer -->
 </body>
 </html>

@@ -2,11 +2,19 @@ fx_version 'cerulean'
 games { 'gta5' }
 
 author 'Azure First Response'
-version '1.5'
+version '1.5.1'
 lua54 'yes'
 
 ui_page 'ui/index.html'
-files { 'ui/index.html' }
+
+files {
+    -- UI
+    'ui/index.html',
+    'ui/styles.css',
+    -- callouts
+    'callouts/manifest.json',
+    'callouts/*.callout'
+}
 
 shared_scripts {
     '@ox_lib/init.lua',
@@ -15,7 +23,7 @@ shared_scripts {
 
 client_scripts {
     'source/client.lua',
-    'client.lua',
+    'client.lua'
 }
 
 server_scripts {
@@ -28,11 +36,5 @@ server_scripts {
 dependencies {
     'ox_lib',
     'ox_target',
-    'oxmysql',
-    'Az-Framework'
-}
-
-files {
-  'callouts/manifest.json',
-  'callouts/*.callout'
+    'oxmysql'
 }
