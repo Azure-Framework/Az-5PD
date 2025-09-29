@@ -1,5 +1,11 @@
--- Extended config options (you can edit these values)
 Config = Config or {}
+
+Config.AllowedJobs = {
+    "police",
+    "ambulance",
+    "fire"
+}
+
 
 Config.Wander = Config.Wander or {
   driveSpeed = 20.0,

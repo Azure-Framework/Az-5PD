@@ -1,3 +1,35 @@
+Config = Config or {}
+
+RegisterNetEvent("AzFR:requestPlayerJob", function()
+    local src = source
+    local job = exports["Az-Framework"]:getPlayerJob(src)
+    TriggerClientEvent("AzFR:responsePlayerJob", src, job)
+end)
+
+
+local function isJobAllowed(job)
+    if not job then return false end
+    for _, allowed in ipairs(Config.AllowedJobs) do
+        if job == allowed then return true end
+    end
+    return false
+end
+
+
+local function getPlayerJob(src)
+    return exports["Az-Framework"]:getPlayerJob(src)
+end
+
+RegisterNetEvent("AzFR:doActionIfAllowed", function()
+    local src = source
+    local job = getPlayerJob(src)
+
+    if isJobAllowed(job) then
+
+        print(("Access granted for %s (job=%s)"):format(GetPlayerName(src) or src, job))
+
+        
+
 local CalloutTemplates = {}
 local ActiveCallouts = {}
 local pendingPosRequests = {}
@@ -866,4 +898,9 @@ AddEventHandler('mdt:requestRecords', function(targetType, targetValue)
       TriggerClientEvent('mdt:recordsResult', src, rows, targetType)
     end
   )
+end)
+
+    else
+        print("You are not an allowed department.")
+    end
 end)
