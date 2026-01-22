@@ -1,0 +1,46 @@
+return {
+  title = "Intoxicated Individual",
+  description = "Caller reports a person stumbling around, possibly intoxicated.",
+  server = {
+    getCoords = function()
+      local base = { x = 130.0, y = -1275.0, z = 29.0 } -- Example near a bar
+      local rx = base.x + math.random(-20, 20)
+      local ry = base.y + math.random(-20, 20)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedModels = { "a_m_y_stlat_01", "a_m_y_stwhi_01", "a_m_y_genstreet_01", "a_m_m_tramp_01", "a_m_y_hipster_01" }
+        local pedHash = GetHashKey(pedModels[math.random(1, #pedModels)])
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer() - t0 < 3000 do
+          Citizen.Wait(10)
+        end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z + 0.5, math.random(0, 360) + 0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped, true, true)
+
+          -- Apply drunk walking behavior
+          RequestAnimSet("move_m@drunk@verydrunk")
+          while not HasAnimSetLoaded("move_m@drunk@verydrunk") do
+            Citizen.Wait(10)
+          end
+          SetPedMovementClipset(ped, "move_m@drunk@verydrunk", 1.0)
+          SetPedIsDrunk(ped, true)
+          SetPedConfigFlag(ped, 100, true) -- Prevents instant fleeing
+          SetBlockingOfNonTemporaryEvents(ped, true)
+          
+          -- Make them wander around aimlessly
+          TaskWanderStandard(ped, 10.0, 10)
+          SetPedKeepTask(ped, true)
+        end
+
+        return { ped }
+      end
+    ]]
+  }
+}

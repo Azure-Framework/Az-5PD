@@ -1,0 +1,42 @@
+return {
+  title = "Reckless Driver",
+  description = "Multiple callers report a vehicle speeding and swerving.",
+  server = {
+    getCoords = function()
+      local base = { x = 225.0, y = -950.0, z = 29.3 }
+      local rx = base.x + math.random(-40,40)
+      local ry = base.y + math.random(-40,40)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local vehHash = GetHashKey("sultan")
+        local pedHash = GetHashKey("a_m_y_business_01")
+        RequestModel(vehHash); RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while (not HasModelLoaded(vehHash) or not HasModelLoaded(pedHash)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
+
+        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z, math.random(0,360)+0.0, true, false)
+        local drv = 0
+        if DoesEntityExist(veh) then
+          SetEntityAsMissionEntity(veh,true,true)
+          SetVehicleDoorsLocked(veh, 1)
+          drv = CreatePedInsideVehicle(veh, 4, pedHash, -1, true, false)
+        end
+
+        if drv ~= 0 and DoesEntityExist(drv) then
+          SetEntityAsMissionEntity(drv,true,true)
+          SetBlockingOfNonTemporaryEvents(drv,true)
+          TaskVehicleDriveWander(drv, veh, 30.0, 786603)
+        end
+
+        local out = {}
+        if DoesEntityExist(veh) then table.insert(out, veh) end
+        if drv ~= 0 and DoesEntityExist(drv) then table.insert(out, drv) end
+        return out
+      end
+    ]]
+  }
+}

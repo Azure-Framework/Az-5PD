@@ -1,0 +1,57 @@
+return {
+  title = "Traffic Collision - Possible Injuries",
+  description = "Two vehicles involved in a collision. Injuries reported.",
+  server = {
+    getCoords = function()
+      local base = { x = 402.0, y = -1020.0, z = 29.0 }
+      local rx = base.x + math.random(-25,25)
+      local ry = base.y + math.random(-25,25)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local veh1 = GetHashKey("blista")
+        local veh2 = GetHashKey("primo2")
+        RequestModel(veh1); RequestModel(veh2)
+        local t0 = GetGameTimer()
+        while (not HasModelLoaded(veh1) or not HasModelLoaded(veh2)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
+
+        local angle = math.random(0,359) + 0.0
+        local v1 = CreateVehicle(veh1, coords.x+2.5, coords.y, coords.z, angle, true, false)
+        local v2 = CreateVehicle(veh2, coords.x-2.5, coords.y, coords.z, angle+180.0, true, false)
+
+        local peds = {}
+        if DoesEntityExist(v1) then
+          SetEntityAsMissionEntity(v1,true,true)
+          SetVehicleEngineHealth(v1, 100.0)
+          SetVehicleDoorsLocked(v1, 1)
+          local d1 = CreatePedInsideVehicle(v1, 4, GetHashKey("a_m_y_business_03"), -1, true, false)
+          if DoesEntityExist(d1) then
+            SetEntityAsMissionEntity(d1,true,true)
+            TaskWrithe(d1, PlayerPedId(), 5000, 0)
+            table.insert(peds, d1)
+          end
+        end
+        if DoesEntityExist(v2) then
+          SetEntityAsMissionEntity(v2,true,true)
+          SetVehicleEngineHealth(v2, 100.0)
+          SetVehicleDoorsLocked(v2, 1)
+          local d2 = CreatePedInsideVehicle(v2, 4, GetHashKey("a_f_y_business_04"), -1, true, false)
+          if DoesEntityExist(d2) then
+            SetEntityAsMissionEntity(d2,true,true)
+            TaskWrithe(d2, PlayerPedId(), 5000, 0)
+            table.insert(peds, d2)
+          end
+        end
+
+        local out = {}
+        if DoesEntityExist(v1) then table.insert(out, v1) end
+        if DoesEntityExist(v2) then table.insert(out, v2) end
+        for _,p in ipairs(peds) do table.insert(out, p) end
+        return out
+      end
+    ]]
+  }
+}

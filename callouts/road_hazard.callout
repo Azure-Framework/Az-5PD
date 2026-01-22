@@ -1,0 +1,30 @@
+return {
+  title = "Road Hazard",
+  description = "Debris reported in the roadway.",
+  server = {
+    getCoords = function()
+      local base = { x = 254.0, y = -1157.0, z = 29.3 }
+      local rx = base.x + math.random(-25,25)
+      local ry = base.y + math.random(-25,25)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local cone = GetHashKey("prop_roadcone02a")
+        local barrier = GetHashKey("prop_barrier_work05")
+        RequestModel(cone); RequestModel(barrier)
+        local t0 = GetGameTimer()
+        while (not HasModelLoaded(cone) or not HasModelLoaded(barrier)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
+
+        local objs = {}
+        local o1 = CreateObject(cone, coords.x, coords.y, coords.z-1.0, true, true, false)
+        local o2 = CreateObject(barrier, coords.x+1.2, coords.y+0.3, coords.z-1.0, true, true, false)
+        if DoesEntityExist(o1) then SetEntityAsMissionEntity(o1,true,true) table.insert(objs,o1) end
+        if DoesEntityExist(o2) then SetEntityAsMissionEntity(o2,true,true) table.insert(objs,o2) end
+        return objs
+      end
+    ]]
+  }
+}

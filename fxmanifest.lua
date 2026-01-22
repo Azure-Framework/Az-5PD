@@ -1,21 +1,20 @@
 fx_version 'cerulean'
 games { 'gta5' }
 
-author 'Azure-FivePD'
-version '1.6'
+author 'Azure'
+version '1.5'
 lua54 'yes'
 
 ui_page 'ui/index.html'
 
 files {
-    -- UI
+
     'ui/index.html',
     'ui/styles.css',
     'ui/*.js',
     'ui/images/*',
     'ui/fonts/*',
 
-    -- callouts
     'callouts/manifest.json',
     'callouts/*.callout'
 }
@@ -23,13 +22,16 @@ files {
 shared_scripts {
     '@ox_lib/init.lua',
     'config.lua',
-        'server.lua'
+    'names.lua',
 }
 
 client_scripts {
+
     'source/client.lua',
     'client.lua',
-    'source/traffic_manager.lua'
+    'source/traffic_manager.lua',
+    'source/service.lua',
+    'source/randomevents.lua'
 }
 
 server_scripts {
@@ -38,7 +40,6 @@ server_scripts {
     'server.lua'
 }
 
--- ensure these resources are present before starting this resource
 dependencies {
     'ox_lib',
     'ox_target',

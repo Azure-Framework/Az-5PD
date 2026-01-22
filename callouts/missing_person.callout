@@ -1,0 +1,30 @@
+return {
+  title = "Missing Person - Located",
+  description = "Caller believes a missing relative is in the area.",
+  server = {
+    getCoords = function()
+      local base = { x = -422.0, y = 1124.0, z = 325.0 }
+      local rx = base.x + math.random(-30,30)
+      local ry = base.y + math.random(-30,30)
+      return { x = rx, y = ry, z = 325.0 }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedHash = GetHashKey("a_f_y_hiker_01")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.3, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskWanderStandard(ped, 2.0, 10)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

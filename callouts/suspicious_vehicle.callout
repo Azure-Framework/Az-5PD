@@ -1,0 +1,33 @@
+return {
+  title = "Suspicious Vehicle",
+  description = "Parked vehicle running for a long time, occupants unknown.",
+  server = {
+    getCoords = function()
+      local base = { x = 380.0, y = -204.0, z = 58.0 }
+      local rx = base.x + math.random(-25,25)
+      local ry = base.y + math.random(-25,25)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local vehHash = GetHashKey("glendale")
+        RequestModel(vehHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(vehHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(veh) then
+          SetEntityAsMissionEntity(veh,true,true)
+          SetVehicleEngineOn(veh, true, true, false)
+          SetVehicleDoorsLocked(veh, 1)
+          SetVehicleLights(veh, 2)
+        end
+        local out = {}
+        if DoesEntityExist(veh) then table.insert(out,veh) end
+        return out
+      end
+    ]]
+  }
+}

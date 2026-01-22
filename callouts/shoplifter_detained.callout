@@ -1,0 +1,32 @@
+return {
+  title = "Shoplifter Detained",
+  description = "Store reports a suspected shoplifter being held by staff.",
+  server = {
+    getCoords = function()
+      local base = { x = -47.0, y = -1755.0, z = 29.4 }
+      local rx = base.x + math.random(-8,8)
+      local ry = base.y + math.random(-8,8)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local clerk = GetHashKey("s_m_m_shop_keep_01")
+        local suspect = GetHashKey("a_m_y_stwhi_01")
+        RequestModel(clerk); RequestModel(suspect)
+        local t0 = GetGameTimer()
+        while (not HasModelLoaded(clerk) or not HasModelLoaded(suspect)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
+
+        local c = CreatePed(4, clerk, coords.x+0.8, coords.y, coords.z+0.5, 90.0, true, false)
+        local s = CreatePed(4, suspect, coords.x-0.8, coords.y, coords.z+0.5, 270.0, true, false)
+        if DoesEntityExist(c) then SetEntityAsMissionEntity(c,true,true) SetBlockingOfNonTemporaryEvents(c,true) TaskStandStill(c, 30000) end
+        if DoesEntityExist(s) then SetEntityAsMissionEntity(s,true,true) SetBlockingOfNonTemporaryEvents(s,true) TaskHandsUp(s, 30000, PlayerPedId(), -1, true) end
+        local out = {}
+        if DoesEntityExist(c) then table.insert(out,c) end
+        if DoesEntityExist(s) then table.insert(out,s) end
+        return out
+      end
+    ]]
+  }
+}

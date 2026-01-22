@@ -1,0 +1,38 @@
+return {
+  title = "Disturbance - Yelling",
+  description = "Caller reports a person yelling at passersby and causing a disturbance.",
+  server = {
+    getCoords = function()
+      local base = { x = -75.0, y = -816.0, z = 30.0 }
+      local rx = base.x + math.random(-20,20)
+      local ry = base.y + math.random(-20,20)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local models = { "a_m_y_stlat_01", "a_m_y_genstreet_01", "a_m_m_tramp_01", "a_m_y_hipster_01" }
+        local pedHash = GetHashKey(models[math.random(#models)])
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskWanderStandard(ped, 10.0, 10)
+          Citizen.CreateThread(function()
+            local start = GetGameTimer()
+            while DoesEntityExist(ped) and GetGameTimer()-start < 30000 do
+              Citizen.Wait(math.random(1500, 3500))
+              PlayPain(ped, 6, 0)
+            end
+          end)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

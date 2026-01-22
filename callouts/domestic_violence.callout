@@ -1,0 +1,40 @@
+return {
+  title = "Domestic Disturbance",
+  description = "Caller reports yelling and possible physical altercation between two parties.",
+  server = {
+    getCoords = function()
+      local base = { x = -1065.0, y = -1150.0, z = 2.2 }
+      local rx = base.x + math.random(-12,12)
+      local ry = base.y + math.random(-12,12)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local male  = GetHashKey("a_m_m_business_01")
+        local female= GetHashKey("a_f_y_tourist_01")
+        RequestModel(male); RequestModel(female)
+        local t0 = GetGameTimer()
+        while (not HasModelLoaded(male) or not HasModelLoaded(female)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
+
+        local p1 = CreatePed(4, male, coords.x+0.5, coords.y, coords.z+0.5, 0.0, true, false)
+        local p2 = CreatePed(4, female, coords.x-0.5, coords.y, coords.z+0.5, 180.0, true, false)
+        if DoesEntityExist(p1) then SetEntityAsMissionEntity(p1,true,true) SetBlockingOfNonTemporaryEvents(p1,true) end
+        if DoesEntityExist(p2) then SetEntityAsMissionEntity(p2,true,true) SetBlockingOfNonTemporaryEvents(p2,true) end
+
+        if DoesEntityExist(p1) and DoesEntityExist(p2) then
+          if math.random() < 0.5 then
+            TaskStandStill(p1, 30000)
+            TaskStandStill(p2, 30000)
+          else
+            SetPedFleeAttributes(p2, 0, false)
+            TaskCombatPed(p1, p2, 0, 16)
+            TaskCombatPed(p2, p1, 0, 16)
+          end
+        end
+        return { p1, p2 }
+      end
+    ]]
+  }
+}

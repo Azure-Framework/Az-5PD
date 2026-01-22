@@ -1,0 +1,34 @@
+return {
+  title = "Possible Overdose",
+  description = "Unconscious person found. Breathing slow, unknown drugs.",
+  server = {
+    getCoords = function()
+      local base = { x = -536.0, y = -217.0, z = 37.7 }
+      local rx = base.x + math.random(-18,18)
+      local ry = base.y + math.random(-18,18)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedHash = GetHashKey("a_m_m_tramp_01")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.3, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          SetEntityHealth(ped, 120)
+          RequestAnimDict("amb@world_human_bum_slumped@male@laying_on_left_side@base")
+          local t1 = GetGameTimer()
+          while not HasAnimDictLoaded("amb@world_human_bum_slumped@male@laying_on_left_side@base") and GetGameTimer()-t1 < 1500 do Citizen.Wait(10) end
+          TaskPlayAnim(ped, "amb@world_human_bum_slumped@male@laying_on_left_side@base", "base", 2.0, 2.0, -1, 1, 0, false, false, false)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

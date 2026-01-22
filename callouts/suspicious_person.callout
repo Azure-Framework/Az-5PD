@@ -1,0 +1,40 @@
+return {
+  title = "Suspicious Person",
+  description = "Caller reports a person loitering and looking into vehicles.",
+  server = {
+    getCoords = function()
+      local base = { x = 115.0, y = -1060.0, z = 29.2 }
+      local rx = base.x + math.random(-35,35)
+      local ry = base.y + math.random(-35,35)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local models = { "a_m_m_skater_01", "a_m_y_hipster_02", "a_m_y_stwhi_01" }
+        local pedHash = GetHashKey(models[math.random(#models)])
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskWanderStandard(ped, 5.0, 10)
+          Citizen.CreateThread(function()
+            local start = GetGameTimer()
+            while DoesEntityExist(ped) and GetGameTimer()-start < 30000 do
+              Citizen.Wait(math.random(3000,6000))
+              TaskStartScenarioInPlace(ped, "WORLD_HUMAN_BUM_WASH", 0, true)
+              Citizen.Wait(2000)
+              ClearPedTasks(ped)
+            end
+          end)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

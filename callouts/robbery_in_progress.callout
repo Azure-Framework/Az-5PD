@@ -1,0 +1,48 @@
+return {
+  title = "Robbery in Progress",
+  description = "Clerk whispered 911: suspect inside demanding cash.",
+  server = {
+    getCoords = function()
+      local base = { x = 28.0, y = -1339.0, z = 29.5 }
+      local rx = base.x + math.random(-10,10)
+      local ry = base.y + math.random(-10,10)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function dist(a, b)
+        local dx,dy,dz = (a.x-b.x), (a.y-b.y), ((a.z or 0.0)-(b.z or 0.0))
+        return math.sqrt(dx*dx+dy*dy+dz*dz)
+      end
+      return function(coords)
+        local robber = GetHashKey("g_m_y_ballaorig_01")
+        RequestModel(robber)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(robber) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, robber, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 80, false, true)
+          SetPedCombatAttributes(ped, 46, true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          SetPedKeepTask(ped,true)
+          TaskGuardCurrentPosition(ped, 5.0, 5.0, true)
+          Citizen.CreateThread(function()
+            while DoesEntityExist(ped) do
+              Citizen.Wait(700)
+              local pcoords = GetEntityCoords(PlayerPedId())
+              local pc = {x=pcoords.x,y=pcoords.y,z=pcoords.z}
+              if dist(pc, coords) < 15.0 then
+                TaskCombatPed(ped, PlayerPedId(), 0, 16)
+                break
+              end
+            end
+          end)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

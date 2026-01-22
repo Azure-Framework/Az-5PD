@@ -21,12 +21,10 @@ local function getPlayerJobFromServer(cb)
 end
 
 Citizen.CreateThread(function()
-    Wait(200) -- allow exports to initialize
-    getPlayerJobFromServer(function(job)
+    local function __az5pd_init(job)
         if isJobAllowed(job) then
 
         print("[Az-FR | CALLOUT System] Access granted for job: " .. tostring(job))
-
 
             if _G == nil then _G = {} end
             if not _G.__ai_casualty_queue then _G.__ai_casualty_queue = {} end
@@ -37,128 +35,87 @@ Citizen.CreateThread(function()
               end
             end
 
-
-
-
             local function safeNetworkGetNetworkIdFromEntity(entity)
               if not entity or entity == 0 then return nil end
               if not DoesEntityExist(entity) then return nil end
-              local ok, nid = pcall(function() return safeNetworkGetNetworkIdFromEntity(entity) end)
-              if not ok or not nid or nid == 0 then return nil end
-              return nid
-            end
-
-            local function safeNetworkGetEntityFromNetworkId(nid)
-              if not nid then return nil end
-              local n = tonumber(nid) or nid
-              if type(n) ~= "number" then return nil end
-              local ok, ent = pcall(function() return safeNetworkGetEntityFromNetworkId(n) end)
-              if not ok or not ent or ent == 0 then return nil end
-              if not DoesEntityExist(ent) then return nil end
-              return ent
-            end
-
-
-
-
-            local function resolvePed(idOrEntity)
-              if not idOrEntity then return nil, nil end
-              
-              if type(idOrEntity) == "number" and DoesEntityExist(idOrEntity) then
-                local ent = idOrEntity
-                local ok, nid = pcall(function() return PedToNet(ent) end)
-                if ok and nid and nid ~= 0 then
-                  return ent, nid
-                else
-                  return ent, nil
-                end
-              end
-              
-              local nid = tonumber(idOrEntity)
-              if nid then
-                local ok, ent = pcall(function() return NetworkGetEntityFromNetworkId(nid) end)
-                if ok and ent and ent ~= 0 and DoesEntityExist(ent) then
-                  return ent, nid
-                end
-                
-                
-                local ok2, exists = pcall(function() return NetworkDoesEntityExistWithNetworkId and NetworkDoesEntityExistWithNetworkId(nid) end)
-                if ok2 and exists then
-                  local ok3, ent2 = pcall(function() return NetworkGetEntityFromNetworkId(nid) end)
-                  if ok3 and ent2 and ent2 ~= 0 and DoesEntityExist(ent2) then
-                    return ent2, nid
-                  end
-                end
-              end
-              return nil, nil
-            end
-
-            local function safeNetToPed(netIdOrEntity)
-              
-              local ent, nid = resolvePed(netIdOrEntity)
-              if ent and DoesEntityExist(ent) then return ent end
+              local ok, nid = pcall(NetworkGetNetworkIdFromEntity, entity)
+              if ok and nid and nid ~= 0 then return nid end
               return nil
             end
 
-            local function safePedToNet(pedOrNetId)
-              
-              if not pedOrNetId then return nil end
-              
-              if type(pedOrNetId) == "number" and DoesEntityExist(pedOrNetId) then
-                local ok, nid = pcall(function() return PedToNet(pedOrNetId) end)
-                if ok and nid and nid ~= 0 then return nid end
-                return nil
-              end
-              
-              local nid = tonumber(pedOrNetId)
-              if nid then
-                local ok, exists = pcall(function() return NetworkDoesEntityExistWithNetworkId and NetworkDoesEntityExistWithNetworkId(nid) end)
-                if ok and exists then return nid end
-              end
-              return nil
-            end
-
-            local function safeNetworkGetEntityFromIdMaybe(n)
-              if not n then return nil end
-              local nn = tonumber(n) or n
-              if type(nn) ~= "number" then return nil end
-              local ok, ent = pcall(function() return NetworkGetEntityFromNetworkId(nn) end)
+            local function safeNetworkGetEntityFromNetworkId(netId)
+              netId = tonumber(netId)
+              if not netId or netId == 0 then return nil end
+              local ok, ent = pcall(NetworkGetEntityFromNetworkId, netId)
               if ok and ent and ent ~= 0 and DoesEntityExist(ent) then return ent end
               return nil
             end
 
+            local function resolvePed(pedOrNetId)
+              if pedOrNetId == nil then return nil end
+              local n = tonumber(pedOrNetId)
+              if not n or n == 0 then return nil end
+              if DoesEntityExist(n) then
+                return n
+              end
+              local ent = safeNetworkGetEntityFromNetworkId(n)
+              if ent and ent ~= 0 and DoesEntityExist(ent) and IsEntityAPed(ent) then
+                return ent
+              end
+              return nil
+            end
 
+            local function safeNetToPed(pedNetId)
+              return resolvePed(pedNetId)
+            end
+
+            local function safePedToNet(pedOrNetId)
+              if pedOrNetId == nil then return nil end
+              local n = tonumber(pedOrNetId)
+              if not n or n == 0 then return nil end
+
+              if not DoesEntityExist(n) then
+                return n
+              end
+
+              local ok, isNet = pcall(NetworkGetEntityIsNetworked, n)
+              if ok and not isNet then
+
+                return nil
+              end
+
+              local ok2, nid = pcall(function() return PedToNet(n) end)
+              if ok2 and nid and nid ~= 0 then return nid end
+
+              nid = safeNetworkGetNetworkIdFromEntity(n)
+              if nid and nid ~= 0 then return nid end
+              return nil
+            end
+
+            local function safeNetworkGetEntityFromIdMaybe(id)
+              id = tonumber(id)
+              if not id or id == 0 then return nil end
+              if DoesEntityExist(id) then return id end
+              return safeNetworkGetEntityFromNetworkId(id)
+            end
 
             local function safeNetToEntity(netId)
               return safeNetworkGetEntityFromNetworkId(netId)
             end
 
-            local function safePedToNet(ped)
-              if not ped or ped == 0 then return nil end
-              if not DoesEntityExist(ped) then return nil end
-              local ok, isNet = pcall(function() return NetworkGetEntityIsNetworked(ped) end)
-              if not ok or not isNet then return nil end
-              local ok2, nid = pcall(function() return safePedToNet(ped) end)
-              if ok2 and nid and nid ~= 0 then return nid end
-              return nil
-            end
-
             local function safeEntityToNet(entity)
               if not entity or entity == 0 then return nil end
               if not DoesEntityExist(entity) then return nil end
-              local ok, isNet = pcall(function() return NetworkGetEntityIsNetworked(entity) end)
-              if not ok or not isNet then return nil end
-              local ok2, nid = pcall(function() return safeNetworkGetNetworkIdFromEntity(entity) end)
-              if ok2 and nid and nid ~= 0 then return nid end
+              local ok, isNet = pcall(NetworkGetEntityIsNetworked, entity)
+              if ok and not isNet then return nil end
+              local nid = safeNetworkGetNetworkIdFromEntity(entity)
+              if nid and nid ~= 0 then return nid end
               return nil
             end
 
-
-
-            local stopEnabled, debugEnabled = true, true
+local stopEnabled, debugEnabled = true, true
             local pedData, lastPedNetId = {}, nil
-            local lastPedEntity = nil          
-
+            local lastPedEntity = nil
 
             local function stopPedFromTarget(data)
               local pedEntity = nil
@@ -194,12 +151,10 @@ Citizen.CreateThread(function()
               lastPedNetId = netId
               lastPedEntity = pedEntity
 
-              
               if setPedProtected then pcall(function() setPedProtected(netId, true) end) end
               pedData[netId].pulledInVehicle = false
               pedData[netId].forcedStop = false
 
-              
               NetworkRequestControlOfEntity(pedEntity)
               SetEntityAsMissionEntity(pedEntity, true, true)
               SetBlockingOfNonTemporaryEvents(pedEntity, true)
@@ -209,10 +164,8 @@ Citizen.CreateThread(function()
                 pcall(function() notify("stop_done","Stop","Ped stopped and detained on-foot.", 'success','person','') end)
               end
 
-              
               pcall(function() TriggerEvent('__clientRequestPopulate') end)
             end
-
 
             if exports and exports.ox_target and exports.ox_target.addGlobalPed then
               pcall(function()
@@ -227,7 +180,6 @@ Citizen.CreateThread(function()
                 })
               end)
             end
-
 
             local isDragging, draggedPed = false, nil
             local pullVeh = nil
@@ -248,15 +200,14 @@ Citizen.CreateThread(function()
             local lastIdHistory = {}
             local lastMake, lastColor = nil, nil
 
-            local HOLD_SURRENDER_MS = 3000 
-            local HOLD_PULL_MS = 1500       
+            local HOLD_SURRENDER_MS = 3000
+            local HOLD_PULL_MS = 1500
 
             local citationReasons = {
               "Speeding","Reckless Driving","Illegal Parking",
               "No Insurance","Expired Registration",
               "Failure to Signal","Distracted Driving","Broken Taillight"
             }
-
 
             local function generatePerson()
 
@@ -596,7 +547,6 @@ Citizen.CreateThread(function()
                       signature = sig, wanted = wanted }
             end
 
-
             local function notify(id, title, desc, typ, icon, iconColor)
               if lib and lib.notify then
                 lib.notify({
@@ -657,12 +607,11 @@ Citizen.CreateThread(function()
               showIDCard(d)
             end
 
-            local 
+            local
             function resolveLastPed()
-              
-              
+
               dprint("resolveLastPed: start lastPedNetId=", tostring(lastPedNetId), " lastPedEntity=", tostring(lastPedEntity))
-              
+
               if lastPedEntity and type(lastPedEntity) == "number" and DoesEntityExist(lastPedEntity) then
                 local ent = lastPedEntity
                 local ok, nid = pcall(function() return PedToNet(ent) end)
@@ -674,14 +623,13 @@ Citizen.CreateThread(function()
                 return ent, nil
               end
 
-              
               if lastPedNetId then
                 local ent, nid = resolvePed(lastPedNetId)
                 if ent and DoesEntityExist(ent) then
                   dprint("resolveLastPed: resolved from netId -> entity=", tostring(ent), " nid=", tostring(nid))
                   return ent, nid
                 end
-                
+
                 local ok, ent2 = pcall(function() return NetworkGetEntityFromNetworkId(tonumber(lastPedNetId) or lastPedNetId) end)
                 if ok and ent2 and ent2 ~= 0 and DoesEntityExist(ent2) then
                   local ok2, nid2 = pcall(function() return PedToNet(ent2) end)
@@ -696,7 +644,6 @@ Citizen.CreateThread(function()
               dprint("resolveLastPed: failed to resolve ped")
               return nil, nil
             end
-
 
             local function showIDSafely(netId)
               dprint("showIDSafely called with netId=", tostring(netId))
@@ -734,7 +681,7 @@ Citizen.CreateThread(function()
               end
 
               TriggerServerEvent('mdt:lookupID', lastPedNetId)
-              
+
               if pedData[tostring(lastPedNetId)] or pedData[tostring(lastPedNetId)] then
                 showIDCard(pedData[tostring(lastPedNetId)] or pedData[tostring(lastPedNetId)])
               end
@@ -784,7 +731,7 @@ Citizen.CreateThread(function()
                   plateTxt = (GetVehicleNumberPlateText(veh) or ""):match("%S+")
                   makeTxt  = getVehicleDisplayName(veh)
                   colorTxt = getVehicleColorHint(veh)
-                  
+
                   if plateTxt and plateTxt ~= "" then lastPlate = plateTxt:upper() end
                   if makeTxt and makeTxt ~= "" then lastMake = makeTxt end
                   if colorTxt and colorTxt ~= "" then lastColor = colorTxt end
@@ -793,7 +740,7 @@ Citizen.CreateThread(function()
 
               if plateTxt and plateTxt:match("%S+") then
                 lastPlate = plateTxt:upper()
-                
+
                 TriggerServerEvent('mdt:lookupPlate', lastPlate, getPedName(lastPedNetId), lastMake or "", lastColor or "")
               else
                 notify("plate_failed","Lookup Failed",
@@ -803,7 +750,7 @@ Citizen.CreateThread(function()
             end
 
             local isOpen = false
-            local EMERGENCY_CLASSES = { [18]=true, [56]=true } 
+            local EMERGENCY_CLASSES = { [18]=true, [56]=true }
             local function inEmergencyVehicle()
               local ped = PlayerPedId()
               if not IsPedInAnyVehicle(ped,false) then return false end
@@ -895,7 +842,7 @@ Citizen.CreateThread(function()
 
             monitorKeepInVehicle = function(netId, veh, durationMs)
               if not netId or not veh then return end
-              durationMs = durationMs or 30000 
+              durationMs = durationMs or 30000
               local startTime = GetGameTimer()
               Citizen.CreateThread(function()
                 local deadline = startTime + durationMs
@@ -951,10 +898,6 @@ Citizen.CreateThread(function()
               dprint("releasePedAttention", tostring(ped))
             end
 
-
-
-
-
             local function num(v)
               if v == nil then return nil end
               if type(v) == "number" then return v end
@@ -962,7 +905,6 @@ Citizen.CreateThread(function()
               if ok and res ~= nil then return res end
               return nil
             end
-
 
             local function toXYZ(v)
               if not v then return nil, nil, nil end
@@ -975,7 +917,6 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               local ok, x = pcall(function() return v.x end)
               if ok and x ~= nil then
                 local ok2, y = pcall(function() return v.y end)
@@ -985,7 +926,6 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               ok, x = pcall(function() return v[1] end)
               if ok and x ~= nil then
                 local ok2, y = pcall(function() return v[2] end)
@@ -995,7 +935,6 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               local s = tostring(v or "")
               if type(s) == "string" and #s > 0 then
                 local nums = {}
@@ -1012,32 +951,25 @@ Citizen.CreateThread(function()
               return nil, nil, nil
             end
 
-
-
             local function normalizeToXYZTriple(a,b,c, fallbackX, fallbackY, fallbackZ)
-              
+
               local ax,ay,az = toXYZ(a)
               if ax and ay and az then return ax, ay, az end
 
-              
               local bx,by,bz = toXYZ(b)
               if bx and by and bz then return bx, by, bz end
 
-              
               local cx,cy,cz = toXYZ(c)
               if cx and cy and cz then return cx, cy, cz end
 
-              
               local nx, ny, nz = num(a), num(b), num(c)
 
-              
               nx = nx or num(fallbackX)
               ny = ny or num(fallbackY)
               nz = nz or num(fallbackZ)
 
               if nx and ny and nz then return nx, ny, nz end
 
-              
               if type(a) ~= "number" then
                 local pax,pay,paz = toXYZ(a)
                 if pax and pay and paz then return pax, pay, paz end
@@ -1054,18 +986,15 @@ Citizen.CreateThread(function()
               return nil, nil, nil
             end
 
-
-
             local function safeVector3(a,b,c, fallbackX, fallbackY, fallbackZ)
               local x,y,z = normalizeToXYZTriple(a,b,c, fallbackX, fallbackY, fallbackZ)
               if not x or not y or not z then
                 dprint("safeVector3: invalid components", "a=", tostring(a), "b=", tostring(b), "c=", tostring(c), "-> resolved:", tostring(x), tostring(y), tostring(z))
                 return nil
               end
-              
+
               return { x = x, y = y, z = z }
             end
-
 
             local function requestModelSync(hash)
               if not HasModelLoaded(hash) then
@@ -1078,21 +1007,16 @@ Citizen.CreateThread(function()
               return HasModelLoaded(hash)
             end
 
-            -- attemptPedAttack(pedEntity, vehicleEntity, netId)
-            -- returns true if the ped started an attack, false otherwise
             function attemptPedAttack(ped, veh, netId)
               if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
 
-              -- if it's player-controlled, don't try to force an attack
               if IsPedAPlayer(ped) then return false end
 
-              -- get configurable attack chance (fallback to 0.5)
               local attackChance = (Config and Config.Flee and Config.Flee.attackChance) or 0.5
               if math.random() >= attackChance then
                 return false
               end
 
-              -- try to obtain control of the ped
               if NetworkGetEntityIsNetworked(ped) then
                 NetworkRequestControlOfEntity(ped)
                 local startT = GetGameTimer()
@@ -1104,28 +1028,25 @@ Citizen.CreateThread(function()
                 SetEntityAsMissionEntity(ped, true, true)
               end
 
-              -- clear tasks and prepare the ped
               ClearPedTasksImmediately(ped)
               SetBlockingOfNonTemporaryEvents(ped, true)
               SetPedCanRagdoll(ped, false)
 
               local playerPed = PlayerPedId()
 
-              -- If ped is in a vehicle, prefer shooting from vehicle for a short time
               if IsPedInAnyVehicle(ped, false) then
-                -- try to equip a weapon if ped has none (best-effort, doesn't create new weapon)
+
                 if not HasPedGotWeapon(ped, GetHashKey("WEAPON_PISTOL"), false) then
                   GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
                 end
-                -- attempt to make them shoot at the player for a short duration
+
                 TaskShootAtEntity(ped, playerPed, 8000, 0) -- 8 seconds
               else
-                -- on foot: make them attack the player
+
                 GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
                 TaskCombatPed(ped, playerPed, 0, 16)
               end
 
-              -- mark in pedData that this ped attacked (helps other logic)
               if netId then
                 pedData = pedData or {}
                 pedData[tostring(netId)] = pedData[tostring(netId)] or {}
@@ -1171,7 +1092,6 @@ Citizen.CreateThread(function()
               return veh, driver
             end
 
-
             local function getNearbyDownedPeds(center, radius, humanOnly)
               local found = {}
               local px,py,pz = toXYZ(center)
@@ -1200,7 +1120,6 @@ Citizen.CreateThread(function()
               EndFindPed(handle)
               return found
             end
-
 
             local function getNearbyVehicleToTow(center, radius)
               local px,py,pz = toXYZ(center)
@@ -1242,7 +1161,6 @@ Citizen.CreateThread(function()
               return best
             end
 
-
             local function driveToTarget(driver, veh, targetVec, speed, arriveRadius, driveMode)
               speed = speed or 8.0
               arriveRadius = arriveRadius or 6.0
@@ -1250,7 +1168,6 @@ Citizen.CreateThread(function()
 
               if not driver or driver == 0 or not veh or veh == 0 then return end
 
-              
               local tx,ty,tz = toXYZ(targetVec)
               local targetVec3 = nil
               if type(targetVec) == "table" and targetVec.x ~= nil and targetVec.y ~= nil and targetVec.z ~= nil then
@@ -1301,7 +1218,6 @@ Citizen.CreateThread(function()
               end)
             end
 
-
             callAIEMS = function()
               local player = PlayerPedId()
               local px,py,pz = toXYZ(GetEntityCoords(player))
@@ -1329,10 +1245,8 @@ Citizen.CreateThread(function()
               local targetVec = GetEntityCoords(player)
               driveToTarget(driver, veh, targetVec, 10.0, 6.0)
 
-              
-              
-              local deadPeds = getNearbyDownedPeds(targetVec, 12.0, nil) 
-              
+              local deadPeds = getNearbyDownedPeds(targetVec, 12.0, nil)
+
               if #deadPeds > 0 and type(deadPeds[1]) == 'number' then
                 local conv = {}
                 for _,ph in ipairs(deadPeds) do
@@ -1347,7 +1261,7 @@ Citizen.CreateThread(function()
                 notify("ai_ems_none","No Casualties","EMS arrived but found no dead humans nearby.",'warning','heartbeat','#DD6B20')
               else
                 notify("ai_ems_work","EMS Arrived","EMS tending to casualties.",'success','heartbeat','#38A169')
-                
+
                 table.sort(deadPeds, function(a,b)
                   local ap = a and a.ped or a
                   local bp = b and b.ped or b
@@ -1366,20 +1280,19 @@ Citizen.CreateThread(function()
                 end
 
                 if chosenPed and DoesEntityExist(chosenPed) then
-                  
+
                   NetworkRequestControlOfEntity(chosenPed)
                   SetEntityAsMissionEntity(chosenPed, true, true)
                   ClearPedTasksImmediately(chosenPed)
                   TaskStandStill(chosenPed, 2000)
 
-                  
-                  local respDriver = driver 
+                  local respDriver = driver
                   local medic = nil
                   if DoesEntityExist(veh) then
                     medic = GetPedInVehicleSeat(veh, 0)
                     if medic == 0 then medic = nil end
                   end
-                  
+
                   if not DoesEntityExist(medic) then medic = respDriver end
 
                   if DoesEntityExist(respDriver) then
@@ -1398,22 +1311,16 @@ Citizen.CreateThread(function()
                 end
               end
 
-
-
               cleanupServiceEntities({veh, driver})
               if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
             end
 
-
-
-
             if type(forcePedExitVehicle) ~= "function" then
               function forcePedExitVehicle(ped, veh)
                 if not DoesEntityExist(ped) then return false end
-                
+
                 if not IsPedInAnyVehicle(ped, false) then return true end
 
-                
                 if NetworkGetEntityIsNetworked(ped) then
                   NetworkRequestControlOfEntity(ped)
                 end
@@ -1421,16 +1328,13 @@ Citizen.CreateThread(function()
                   NetworkRequestControlOfEntity(veh)
                 end
 
-                
                 TaskLeaveVehicle(ped, veh, 0)
 
-                
                 local deadline = GetGameTimer() + 3000
                 while IsPedInAnyVehicle(ped, false) and GetGameTimer() < deadline do
                   Citizen.Wait(100)
                 end
 
-                
                 if IsPedInAnyVehicle(ped, false) then
                   ClearPedTasksImmediately(ped)
                   Citizen.Wait(100)
@@ -1439,10 +1343,6 @@ Citizen.CreateThread(function()
                 return not IsPedInAnyVehicle(ped, false)
               end
             end
-
-
-
-
 
             local function findDownedPedsEnumerator(center, radius, humanOnly)
               local result = {}
@@ -1454,11 +1354,11 @@ Citizen.CreateThread(function()
                   local dist = #(pcoords - center)
                   if dist <= radius then
                     local deadOrDying = false
-                    
+
                     if type(IsPedDeadOrDying) == "function" then
                       deadOrDying = IsPedDeadOrDying(ped, true)
                     else
-                      
+
                       local hp = GetEntityHealth(ped) or 0
                       deadOrDying = (hp <= 0)
                     end
@@ -1475,11 +1375,6 @@ Citizen.CreateThread(function()
               return result
             end
 
-
-
-
-
-
             local function handleRemovalInteraction(responderPed, vehicle, casualty, isAnimal)
               print((" [AI DEBUG] handleRemovalInteraction: responder=%s vehicle=%s casualty=%s isAnimal=%s"):format(
                 tostring(responderPed), tostring(vehicle), tostring(casualty), tostring(isAnimal)))
@@ -1487,17 +1382,14 @@ Citizen.CreateThread(function()
               if not DoesEntityExist(responderPed) then print(" [AI DEBUG] responder does not exist") return end
               if not DoesEntityExist(casualty) then print(" [AI DEBUG] casualty does not exist") return end
 
-              
               requestControl(responderPed, 2000)
 
-              
               if IsPedInAnyVehicle(responderPed, false) then
                 print(" [AI DEBUG] removal responder is in vehicle, forcing exit.")
                 forcePedExitVehicle(responderPed, vehicle)
                 Citizen.Wait(200)
               end
 
-              
               TaskGoToEntity(responderPed, casualty, -1, 2.0, 2.0, 1073741824, 0)
               local approachStart = GetGameTimer()
               while GetGameTimer() - approachStart < 12000 do
@@ -1510,24 +1402,21 @@ Citizen.CreateThread(function()
                 Citizen.Wait(200)
               end
 
-              
               local ccoords = GetEntityCoords(casualty)
               TaskTurnPedToFaceCoord(responderPed, ccoords.x, ccoords.y, ccoords.z, 500)
               if requestControl(responderPed, 500) then
-                
+
                 TaskStartScenarioInPlace(responderPed, "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true)
                 Citizen.Wait(1500)
                 ClearPedTasksImmediately(responderPed)
               end
 
-              
               if DoesEntityExist(casualty) then
                 requestControl(casualty, 800)
                 SetEntityAsMissionEntity(casualty, true, true)
                 ClearPedTasksImmediately(casualty)
                 Citizen.Wait(200)
 
-                
                 SetEntityHealth(casualty, 0)
                 Citizen.Wait(200)
                 if DoesEntityExist(casualty) then
@@ -1543,7 +1432,6 @@ Citizen.CreateThread(function()
 
               print((" [AI DEBUG] removal done for casualty=%s exists now? %s"):format(tostring(casualty), tostring(DoesEntityExist(casualty))))
 
-              
               if type(notify) == "function" then
                 if isAnimal then
                   notify("ai_animal_removed","Animal Removed","Animal Control collected the animal.", 'success', 'paw', '#38A169')
@@ -1553,18 +1441,13 @@ Citizen.CreateThread(function()
               end
             end
 
-
-
-
-
-
             local function handleRemovalInteraction(responderPed, vehicle, casualty, isAnimal)
-              
+
               local function safeRequestControl(entity, timeout)
                 timeout = timeout or 1000
                 if not DoesEntityExist(entity) then return false end
                 if type(requestControl) == "function" then
-                  
+
                   local ok, res = pcall(requestControl, entity, timeout)
                   if ok then return res or true end
                 end
@@ -1586,12 +1469,11 @@ Citizen.CreateThread(function()
                     NetworkRequestControlOfEntity(entity)
                   end
                 end
-                
+
                 if DoesEntityExist(entity) then SetEntityAsMissionEntity(entity, true, true) end
                 return NetworkHasControlOfEntity(entity) or not NetworkGetEntityIsNetworked(entity)
               end
 
-              
               local function safeForceExit(ped, veh)
                 if not DoesEntityExist(ped) then return false end
                 if not IsPedInAnyVehicle(ped, false) then return true end
@@ -1612,24 +1494,21 @@ Citizen.CreateThread(function()
               end
 
               if not DoesEntityExist(responderPed) then
-                dprint("handleRemovalInteraction: responder does not exist") 
-                return 
+                dprint("handleRemovalInteraction: responder does not exist")
+                return
               end
               if not DoesEntityExist(casualty) then
-                dprint("handleRemovalInteraction: casualty does not exist") 
-                return 
+                dprint("handleRemovalInteraction: casualty does not exist")
+                return
               end
 
-              
               safeRequestControl(responderPed, 1200)
 
-              
               if IsPedInAnyVehicle(responderPed, false) then
                 safeForceExit(responderPed, vehicle)
                 Citizen.Wait(150)
               end
 
-              
               TaskGoToEntity(responderPed, casualty, -1, 2.0, 2.0, 1073741824, 0)
               local approachStart = GetGameTimer()
               while GetGameTimer() - approachStart < 12000 do
@@ -1644,7 +1523,6 @@ Citizen.CreateThread(function()
                 Citizen.Wait(200)
               end
 
-              
               local ccoords = GetEntityCoords(casualty)
               TaskTurnPedToFaceCoord(responderPed, ccoords.x, ccoords.y, ccoords.z, 500)
               if safeRequestControl(responderPed, 500) then
@@ -1653,14 +1531,12 @@ Citizen.CreateThread(function()
                 ClearPedTasksImmediately(responderPed)
               end
 
-              
               if DoesEntityExist(casualty) then
                 safeRequestControl(casualty, 800)
                 SetEntityAsMissionEntity(casualty, true, true)
                 ClearPedTasksImmediately(casualty)
                 Citizen.Wait(150)
 
-                
                 SetEntityHealth(casualty, 0)
                 Citizen.Wait(120)
                 if DoesEntityExist(casualty) then
@@ -1676,7 +1552,6 @@ Citizen.CreateThread(function()
 
               dprint(("handleRemovalInteraction: removal done for casualty=%s exists now? %s"):format(tostring(casualty), tostring(DoesEntityExist(casualty))))
 
-              
               if type(notify) == "function" then
                 if isAnimal then
                   notify("ai_animal_removed","Animal Removed","Animal Control collected the animal.", 'success', 'paw', '#38A169')
@@ -1686,13 +1561,11 @@ Citizen.CreateThread(function()
               end
             end
 
-
-
             callAICoroner = function()
               local function safeRequestControl(entity, timeout)
                 timeout = timeout or 1000
                 if not DoesEntityExist(entity) then return false end
-                
+
                 if type(requestControl) == "function" then
                   return requestControl(entity, timeout)
                 end
@@ -1714,7 +1587,7 @@ Citizen.CreateThread(function()
                     NetworkRequestControlOfEntity(entity)
                   end
                 end
-                
+
                 if DoesEntityExist(entity) then SetEntityAsMissionEntity(entity, true, true) end
                 return NetworkHasControlOfEntity(entity) or not NetworkGetEntityIsNetworked(entity)
               end
@@ -1744,7 +1617,6 @@ Citizen.CreateThread(function()
                 return notify("ai_coroner_fail","Coroner","Could not determine player position.",'error','skull-crossbones','#DD6B20')
               end
 
-              
               math.randomseed(GetGameTimer() + GetPlayerServerId(PlayerId()))
               local spawnDist = math.random(30, 50)
               local spawnAng = math.rad(math.random(0, 359))
@@ -1762,7 +1634,6 @@ Citizen.CreateThread(function()
               end
               local spawnPos = { x = sx, y = sy, z = sz }
 
-              
               local veh, driver = spawnVehicleAndDriver("rumpo", "s_m_m_doctor_01", spawnPos, nodeH or 0.0)
               if not veh or not driver then
                 return notify("ai_coroner_fail","Coroner","Failed to spawn coroner vehicle.",'error','skull-crossbones','#DD6B20')
@@ -1771,10 +1642,8 @@ Citizen.CreateThread(function()
               local blip = createServiceBlip(veh, "Coroner")
               notify("ai_coroner_called","Coroner","Coroner van dispatched. ETA shortly.",'inform','skull-crossbones','#38A169')
 
-              
               driveToTarget(driver, veh, GetEntityCoords(player), 8.0, 6.0)
 
-              
               Citizen.Wait(500)
 
               if type(dprint) == "function" then
@@ -1783,19 +1652,16 @@ Citizen.CreateThread(function()
                 dprint((" [AI DEBUG] callAICoroner: driver in vehicle? %s"):format(tostring(IsPedInAnyVehicle(driver, false))))
               end
 
-              
               if DoesEntityExist(driver) and DoesEntityExist(veh) and IsPedInAnyVehicle(driver, false) then
                 safeForceExit(driver, veh)
                 if type(dprint) == "function" then dprint((" [AI DEBUG] callAICoroner: driver in vehicle after force? %s"):format(tostring(IsPedInAnyVehicle(driver, false)))) end
               end
 
-              
               local center = vector3(px, py, pz)
               if type(dprint) == "function" then dprint((" [AI DEBUG] callAICoroner: Running downed search at center=%.2f,%.2f,%.2f radius=30.0"):format(center.x, center.y, center.z)) end
               local found = getNearbyDownedPeds(center, 30.0, nil)
               if type(dprint) == "function" then dprint((" [AI DEBUG] callAICoroner: Found %d downed peds (raw)"):format(#found)) end
 
-              
               local candidates = {}
               for i, info in ipairs(found) do
                 if type(info) == "table" and info.ped and DoesEntityExist(info.ped) then
@@ -1812,7 +1678,6 @@ Citizen.CreateThread(function()
                 return
               end
 
-              
               table.sort(candidates, function(a,b)
                 local ap = a.ped
                 local bp = b.ped
@@ -1828,13 +1693,11 @@ Citizen.CreateThread(function()
                 return
               end
 
-              
               safeRequestControl(chosenPed, 1000)
               SetEntityAsMissionEntity(chosenPed, true, true)
               ClearPedTasksImmediately(chosenPed)
               TaskStandStill(chosenPed, 2000)
 
-              
               local passenger = nil
               if DoesEntityExist(veh) then
                 passenger = GetPedInVehicleSeat(veh, 0)
@@ -1842,7 +1705,6 @@ Citizen.CreateThread(function()
               end
               if not DoesEntityExist(passenger) then passenger = driver end
 
-              
               if DoesEntityExist(driver) then
                 Citizen.CreateThread(function()
                   handleRemovalInteraction(driver, veh, chosenPed, false)
@@ -1859,9 +1721,6 @@ Citizen.CreateThread(function()
               if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
             end
 
-            -- startFleeDrive(ped, veh)
-            -- Makes `ped` drive away if they're in `veh`, otherwise makes them flee on foot.
-            -- Returns true if a flee task was started, false if not.
             function startFleeDrive(ped, veh)
               if not ped or ped == 0 or not DoesEntityExist(ped) then
                 dprint("startFleeDrive: invalid ped")
@@ -1870,7 +1729,6 @@ Citizen.CreateThread(function()
 
               local playerPed = PlayerPedId()
 
-              -- helper to request network control of an entity (best-effort)
               local function requestControl(ent, timeout)
                 timeout = timeout or 1000
                 if not ent or ent == 0 or not DoesEntityExist(ent) then return false end
@@ -1883,36 +1741,31 @@ Citizen.CreateThread(function()
                   end
                   return NetworkHasControlOfEntity(ent)
                 else
-                  -- locally owned entity: ensure it's mission entity so we can task it
+
                   SetEntityAsMissionEntity(ent, true, true)
                   return true
                 end
               end
 
-              -- On-vehicle flee
               if veh and veh ~= 0 and DoesEntityExist(veh) and IsPedInAnyVehicle(ped, false) then
                 dprint(("startFleeDrive: ped %s in vehicle %s - attempting drive away"):format(tostring(ped), tostring(veh)))
 
-                -- try to control vehicle and ped
                 requestControl(veh, 1200)
                 requestControl(ped, 800)
 
-                -- ensure vehicle is driveable for the task
                 SetVehicleEngineOn(veh, true, true, true)
                 SetVehicleUndriveable(veh, false)
 
-                -- Clear ped tasks then set keep task
                 ClearPedTasksImmediately(ped)
                 SetBlockingOfNonTemporaryEvents(ped, true)
                 SetPedKeepTask(ped, true)
 
-                -- compute a target coord roughly away from player to give the ped somewhere to drive to
                 local pedCoords = GetEntityCoords(ped)
                 local plCoords = GetEntityCoords(playerPed)
                 local dir = vector3(pedCoords.x - plCoords.x, pedCoords.y - plCoords.y, 0.0)
                 local dlen = math.sqrt(dir.x * dir.x + dir.y * dir.y)
                 if dlen < 1.0 then
-                  -- if too close or same point, pick a forward vector from ped heading
+
                   local heading = GetEntityHeading(ped)
                   local hr = math.rad(heading)
                   dir = vector3(-math.sin(hr), math.cos(hr), 0.0)
@@ -1920,24 +1773,20 @@ Citizen.CreateThread(function()
                 end
                 dir = vector3(dir.x / dlen, dir.y / dlen, 0.0)
 
-                -- compute distant target point (200m away) and a slight Z raise to avoid ground issues
                 local fleeDist = 200.0
                 local tx = pedCoords.x + dir.x * fleeDist
                 local ty = pedCoords.y + dir.y * fleeDist
                 local tz = pedCoords.z + 1.0
 
-                -- Task the ped to drive to the coord. Use a longrange variant if available.
                 local speed = 45.0   -- target cruising speed (tweak as desired)
                 local driveStyle = 786603 -- driving style flags (best-effort; tweak if you want calmer/aggressive)
 
-                -- Best-effort use TaskVehicleDriveToCoordLongrange if present, otherwise fallback to TaskVehicleDriveToCoord
                 if type(TaskVehicleDriveToCoordLongrange) == "function" then
                   TaskVehicleDriveToCoordLongrange(ped, veh, tx, ty, tz, speed, driveStyle, 1.0)
                 else
                   TaskVehicleDriveToCoord(ped, veh, tx, ty, tz, speed, 1.0, driveStyle, 5.0, true)
                 end
 
-                -- mark pedData so other logic knows this ped fled
                 pedData = pedData or {}
                 local nid = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or ped)
                 pedData[nid] = pedData[nid] or {}
@@ -1947,25 +1796,20 @@ Citizen.CreateThread(function()
                 return true
               end
 
-              -- On-foot flee
               if not IsPedInAnyVehicle(ped, false) then
                 dprint(("startFleeDrive: ped %s fleeing on foot"):format(tostring(ped)))
 
-                -- request control of ped
                 requestControl(ped, 800)
 
-                -- clear tasks and set flee attributes
                 ClearPedTasksImmediately(ped)
                 SetBlockingOfNonTemporaryEvents(ped, true)
                 SetPedFleeAttributes(ped, 2, true) -- keep fleeing
                 SetPedCanRagdoll(ped, true)
                 SetPedKeepTask(ped, true)
 
-                -- Prefer TaskSmartFleePed so ped runs away from player for a long time
                 local fleeDistance = 200.0
                 TaskSmartFleePed(ped, playerPed, fleeDistance, -1, false, false)
 
-                -- Mark pedData as fled
                 pedData = pedData or {}
                 local nid = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or ped)
                 pedData[nid] = pedData[nid] or {}
@@ -2047,9 +1891,6 @@ Citizen.CreateThread(function()
               if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
             end
 
-
-
-
             local function getPrimaryOccupant(veh)
               if not veh or not DoesEntityExist(veh) then return nil end
               local driver = GetPedInVehicleSeat(veh, -1)
@@ -2097,8 +1938,6 @@ Citizen.CreateThread(function()
                 return
               end
 
-              
-
             do
               local driver = GetPedInVehicleSeat(pullVeh, -1)
               local netId = driver and driver ~= 0 and (safePedToNet(driver) or tostring(driver)) or nil
@@ -2115,9 +1954,8 @@ Citizen.CreateThread(function()
                   end
                 end
 
-                
                 if DoesEntityExist(pullVeh) then
-                  
+
                   if pullVehBlip and DoesBlipExist(pullVehBlip) then
                     RemoveBlip(pullVehBlip)
                     pullVehBlip = nil
@@ -2134,15 +1972,13 @@ Citizen.CreateThread(function()
                     EndTextCommandSetBlipName(pullVehBlip)
                   end
 
-                  
                   notify("pull_fail", Config.Messages.pull_fail.title, Config.Messages.pull_fail.text, Config.Messages.pull_fail.style)
-                  
+
                   notify("pull_fail_blip","Pull-Over","Target is fleeing! Blip placed on vehicle.",'error','car','')
 
-                  
                   Citizen.CreateThread(function()
                     local startTime = GetGameTimer()
-                    local maxDuration = 60000 
+                    local maxDuration = 60000
                     while true do
                       Citizen.Wait(1000)
                       if not pullVehBlip or not DoesBlipExist(pullVehBlip) then break end
@@ -2175,10 +2011,9 @@ Citizen.CreateThread(function()
                     end
                   end)
                 else
-                  
+
                   notify("pull_fail","Pull-Over","Target is fleeing!",'error')
                 end
-                
 
                 pullVeh = nil
                 return
@@ -2196,7 +2031,7 @@ Citizen.CreateThread(function()
                   TriggerServerEvent('mdt:logID', tostring(netId), pedData[tostring(netId)])
                 end
                 lastPedNetId = tostring(netId)
-                lastPedEntity = driver   
+                lastPedEntity = driver
 
                 setPedProtected(netId, true)
                 pedData[tostring(netId)].forcedStop = forceImmediate and true or false
@@ -2210,17 +2045,17 @@ Citizen.CreateThread(function()
               local vehCoords = GetEntityCoords(pullVeh)
               local vehFwd = GetEntityForwardVector(pullVeh)
               local vehRight = vector3(vehFwd.y, -vehFwd.x, 0)
-              local targetPos = vehCoords + vehFwd * 3.0 + vehRight * 1.5 
+              local targetPos = vehCoords + vehFwd * 3.0 + vehRight * 1.5
               local tx, ty, tz = targetPos.x, targetPos.y, targetPos.z
 
               if driver and driver ~= 0 and not IsPedAPlayer(driver) then
-                local slowSpeed = 3.0 
+                local slowSpeed = 3.0
                 TaskVehicleDriveToCoordLongrange(driver, pullVeh, tx, ty, tz, slowSpeed, 786603, 3.0)
                 notify("pull_slow","Pull-Over","Vehicle slowing down to pull over...",'inform','car-side','#4299E1')
 
                 Citizen.CreateThread(function()
                   local done = false
-                  local monitorDeadline = GetGameTimer() + 8000 
+                  local monitorDeadline = GetGameTimer() + 8000
                   while not done and GetGameTimer() < monitorDeadline do
                     if not DoesEntityExist(pullVeh) then done = true break end
                     local curPos = GetEntityCoords(pullVeh)
@@ -2281,7 +2116,7 @@ Citizen.CreateThread(function()
                     'success',
                     'car-side',
                     '#38A169',
-                    15000 
+                    15000
             )
 
                   else
@@ -2297,8 +2132,6 @@ Citizen.CreateThread(function()
               end
             end
 
-
-            -- Robust repositionInteractive with diagnostics + multiple move attempts
             local function repositionInteractive(veh)
               if not veh or not DoesEntityExist(veh) then
                 return notify("no_vehicle","No Vehicle","No pulled vehicle found.",'error','car-side','#E53E3E')
@@ -2338,7 +2171,6 @@ Citizen.CreateThread(function()
               local running = true
               local cancelled = false
 
-              -- debug state so we only log once per press
               local debugState = { up = false, down = false, left = false, right = false }
 
               while running do
@@ -2349,7 +2181,6 @@ Citizen.CreateThread(function()
                   return
                 end
 
-                -- block Q/E from other scripts but still detect them via IsDisabledControlPressed
                 DisableControlAction(0, 44, true) -- Q
                 DisableControlAction(0, 46, true) -- E
 
@@ -2360,7 +2191,6 @@ Citizen.CreateThread(function()
                   curRot = fineRotStep
                 end
 
-                -- ensure we have control before moving each tick (best-effort)
                 if not NetworkHasControlOfEntity(veh) then
                   NetworkRequestControlOfEntity(veh)
                 end
@@ -2378,7 +2208,6 @@ Citizen.CreateThread(function()
                 end
                 local right = vector3(flatFwd.y, -flatFwd.x, 0.0)
 
-                -- helper to check if the vehicle actually moved (returns distance moved)
                 local function movedDistance(oldCoords)
                   local now = GetEntityCoords(veh)
                   local dx = now.x - oldCoords.x
@@ -2386,25 +2215,22 @@ Citizen.CreateThread(function()
                   return math.sqrt(dx*dx + dy*dy)
                 end
 
-                -- function that tries multiple move methods and returns true if moved
                 local function tryMove(target)
-                  -- 1) Try SetEntityCoordsNoOffset
+
                   SetEntityCoordsNoOffset(veh, target.x, target.y, target.z, false, false, false)
                   Citizen.Wait(0)
                   if movedDistance(pos) > 0.0005 then
                     return true, "SetEntityCoordsNoOffset"
                   end
 
-                  -- 2) Try SetEntityCoords (with physics)
                   SetEntityCoords(veh, target.x, target.y, target.z, false, false, false, true)
                   Citizen.Wait(0)
                   if movedDistance(pos) > 0.0005 then
                     return true, "SetEntityCoords"
                   end
 
-                  -- 3) Try toggling collision and move (last resort)
                   local hadCollision = true
-                  -- best-effort read: assume it has collision
+
                   SetEntityCollision(veh, false, false)
                   SetEntityCoordsNoOffset(veh, target.x, target.y, target.z, false, false, false)
                   Citizen.Wait(0)
@@ -2414,7 +2240,6 @@ Citizen.CreateThread(function()
                     return true, "ToggleCollision+SetEntityCoordsNoOffset"
                   end
 
-                  -- 4) As a final physics nudge, set a short velocity in direction, then zero it
                   SetEntityVelocity(veh, flatFwd.x * 5.0, flatFwd.y * 5.0, 0.0)
                   Citizen.Wait(50)
                   SetEntityVelocity(veh, 0.0, 0.0, 0.0)
@@ -2425,13 +2250,11 @@ Citizen.CreateThread(function()
                   return false, "AllFailed"
                 end
 
-                -- Movement input detection: check both normal and disabled controls so we catch input either way
                 local upPressed = IsControlPressed(0, 172) or IsDisabledControlPressed(0, 172)
                 local downPressed = IsControlPressed(0, 173) or IsDisabledControlPressed(0, 173)
                 local leftPressed = IsControlPressed(0, 174) or IsDisabledControlPressed(0, 174)
                 local rightPressed = IsControlPressed(0, 175) or IsDisabledControlPressed(0, 175)
 
-                -- UP
                 if upPressed then
                   local target = vector3(pos.x + flatFwd.x * curStep, pos.y + flatFwd.y * curStep, pos.z)
                   if not debugState.up then
@@ -2449,7 +2272,6 @@ Citizen.CreateThread(function()
                   debugState.up = false
                 end
 
-                -- DOWN
                 if downPressed then
                   local target = vector3(pos.x - flatFwd.x * curStep, pos.y - flatFwd.y * curStep, pos.z)
                   if not debugState.down then
@@ -2466,7 +2288,6 @@ Citizen.CreateThread(function()
                   debugState.down = false
                 end
 
-                -- LEFT / RIGHT strafing
                 if leftPressed then
                   local target = vector3(pos.x - right.x * curStep, pos.y - right.y * curStep, pos.z)
                   if not debugState.left then
@@ -2499,7 +2320,6 @@ Citizen.CreateThread(function()
                   debugState.right = false
                 end
 
-                -- Rotation handling (Q / E). Detect via disabled control so other scripts don't catch it
                 if IsDisabledControlPressed(0, 44) then -- Q
                   local h = GetEntityHeading(veh) - curRot
                   if h < 0 then h = h + 360 end
@@ -2511,7 +2331,6 @@ Citizen.CreateThread(function()
                   SetEntityHeading(veh, h)
                 end
 
-                -- Confirm (ENTER) or alternative accept
                 if IsControlJustReleased(0,191) or IsControlJustReleased(0,201) then
                   NetworkRequestControlOfEntity(veh)
                   SetEntityAsMissionEntity(veh, true, true)
@@ -2524,7 +2343,6 @@ Citizen.CreateThread(function()
                   break
                 end
 
-                -- Cancel (ESC)
                 if IsControlJustReleased(0,200) then
                   cancelled = true
                   running = false
@@ -2548,10 +2366,6 @@ Citizen.CreateThread(function()
                 notify("pull_repos_cancel","Reposition Cancelled","Vehicle restored to original position.",'warning','arrows-spin','#DD6B20')
               end
             end
-
-
-
-
 
             local function notifySimple(title, text)
               notify(("eject_%s"):format(title:gsub("%s","_")), title, text, 'success','car-side','#38A169')
@@ -2673,7 +2487,6 @@ Citizen.CreateThread(function()
                 return notify("fa_fail_pos","First Aid","Could not determine player position.", 'error','heartbeat','#DD6B20')
               end
 
-              
               local targetPed = nil
               if lastPedNetId then
                 local maybe = safeNetToPed( tonumber(lastPedNetId) or lastPedNetId )
@@ -2683,15 +2496,13 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               if not targetPed and lib and type(lib.getClosestPed) == "function" then
                 local ok, ped, pedCoords = pcall(function()
                   return lib.getClosestPed(vector3(px,py,pz), 8.0)
                 end)
 
                 if ok then
-                  
-                  
+
                   local foundPed = nil
                   if type(ped) == "number" then
                     foundPed = ped
@@ -2700,7 +2511,7 @@ Citizen.CreateThread(function()
                   end
 
                   if foundPed and DoesEntityExist(foundPed) and IsPedDeadOrDying(foundPed, true) then
-                    
+
                     local isHuman = true
                     if type(IsPedHuman) == "function" then isHuman = IsPedHuman(foundPed) end
                     if isHuman then
@@ -2717,11 +2528,10 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               if not targetPed then
-                local deadList = getNearbyDownedPeds(vector3(px,py,pz), 8.0, true) 
+                local deadList = getNearbyDownedPeds(vector3(px,py,pz), 8.0, true)
                 if #deadList > 0 then
-                  
+
                   local best, bestd = nil, 1e9
                   for _, ped in ipairs(deadList) do
                     local d = #(GetEntityCoords(ped) - vector3(px,py,pz))
@@ -2740,7 +2550,6 @@ Citizen.CreateThread(function()
                 return notify("fa_player","Cannot Revive Player","This function only revives NPCs.", 'error','ban','#E53E3E')
               end
 
-              
               NetworkRequestControlOfEntity(targetPed)
               local start = GetGameTimer()
               while not NetworkHasControlOfEntity(targetPed) and (GetGameTimer() - start) < 1000 do
@@ -2749,10 +2558,8 @@ Citizen.CreateThread(function()
               SetEntityAsMissionEntity(targetPed, true, true)
               SetBlockingOfNonTemporaryEvents(targetPed, true)
 
-              
               notify("fa_start","First Aid","Applying first aid. Please wait...", 'inform','heartbeat','#4299E1')
 
-              
               local animDict = "mini@triathlon"
               RequestAnimDict(animDict)
               local loadStart = GetGameTimer()
@@ -2761,31 +2568,28 @@ Citizen.CreateThread(function()
                 TaskPlayAnim(PlayerPedId(), animDict, "idle_a", 8.0, -8.0, 4000, 49, 0, false, false, false)
               end
 
-              
               local ok = safeProgressBar({ duration = 4000, label = "Applying First Aid" })
               if not ok then
                 notify("fa_cancel","Cancelled","First aid action cancelled.", 'warning','ban','#DD6B20')
-                
+
                 SetBlockingOfNonTemporaryEvents(targetPed, false)
                 SetEntityAsMissionEntity(targetPed, false, false)
                 return
               end
 
-              
-              local successChance = 0.75 
+              local successChance = 0.75
               local success = (math.random() < successChance)
 
               if success then
-                
+
                 NetworkRequestControlOfEntity(targetPed)
                 SetEntityAsMissionEntity(targetPed, true, true)
                 ClearPedTasksImmediately(targetPed)
 
                 local maxHp = GetEntityMaxHealth(targetPed) or 200
-                local restoreHp = math.min(maxHp, 140) 
+                local restoreHp = math.min(maxHp, 140)
                 SetEntityHealth(targetPed, restoreHp)
 
-                
                 Citizen.Wait(200)
 
                 SetBlockingOfNonTemporaryEvents(targetPed, false)
@@ -2796,15 +2600,14 @@ Citizen.CreateThread(function()
 
                 dprint("attemptFirstAid: revive SUCCESS for ped=", tostring(targetPed))
               else
-                
+
                 notify("fa_fail","Failed","First aid failed. Casualty not revived.", 'error','heartbeat','#E53E3E')
                 dprint("attemptFirstAid: revive FAILED for ped=", tostring(targetPed))
-                
+
                 SetBlockingOfNonTemporaryEvents(targetPed, false)
                 SetEntityAsMissionEntity(targetPed, false, false)
               end
             end
-
 
             if lib and lib.registerContext then
               lib.registerContext({
@@ -2865,7 +2668,7 @@ Citizen.CreateThread(function()
                   { title='Drag/Undrag', icon='arrows-spin', onSelect=function() dprint("Context: Drag/Undrag selected"); toggleDragPed() end },
                   { title='Seat Left (from drag)', icon='car-side', onSelect=function() dprint("Context: Seat Left selected"); seatPed(1) end },
                   { title='Seat Right (from drag)', icon='car-side', onSelect=function() dprint("Context: Seat Right selected"); seatPed(2) end },
-                        
+
                   { title='First Aid (Revive)', icon='heartbeat', description='Attempt to revive a nearby dead NPC', onSelect=function()
                       dprint("Context: First Aid selected")
                       attemptFirstAid()
@@ -2892,21 +2695,17 @@ Citizen.CreateThread(function()
                     if pedData[n] then pedData[n].forcedStop = nil end
                   end
 
-                  
                   SetVehicleEngineOn(pullVeh, true, true, true)
                   SetVehicleHandbrake(pullVeh, false)
                   SetVehicleDoorsLocked(pullVeh, 1)
                   SetVehicleUndriveable(pullVeh, false)
 
-                  
                   releasePedAttention(occ)
                   SetBlockingOfNonTemporaryEvents(occ, false)
 
-                  
                   NetworkRequestControlOfEntity(occ)
                   NetworkRequestControlOfEntity(pullVeh)
 
-                  
                   local start = GetGameTimer()
                   while not NetworkHasControlOfEntity(occ) and (GetGameTimer() - start) < 1000 do
                     NetworkRequestControlOfEntity(occ); Citizen.Wait(10)
@@ -2916,19 +2715,15 @@ Citizen.CreateThread(function()
                     NetworkRequestControlOfEntity(pullVeh); Citizen.Wait(10)
                   end
 
-                  
                   if not IsPedInVehicle(occ, pullVeh, true) or GetPedInVehicleSeat(pullVeh, -1) ~= occ then
-                    TaskWarpPedIntoVehicle(occ, pullVeh, -1) 
+                    TaskWarpPedIntoVehicle(occ, pullVeh, -1)
                     Citizen.Wait(150)
                   end
 
-                  
-                  SetDriverAbility(occ, Config.Flee.driverAbility or 1.0)        
-                  SetDriverAggressiveness(occ, Config.Flee.driverAggressiveness or 0.7) 
+                  SetDriverAbility(occ, Config.Flee.driverAbility or 1.0)
+                  SetDriverAggressiveness(occ, Config.Flee.driverAggressiveness or 0.7)
                   SetPedKeepTask(occ, true)
 
-                  
-                  
                   local occNet_local = safePedToNet(occ) or tostring(occ)
                   if pedData and pedData[tostring(occNet_local)] and (pedData[tostring(occNet_local)].wanted or pedData[tostring(occNet_local)].suspended) then
                     if not attemptPedAttack(occ, pullVeh, occNet_local) then
@@ -2937,11 +2732,9 @@ Citizen.CreateThread(function()
                   else
                     TaskVehicleDriveWander(occ, pullVeh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
                   end
-                
 
-                  
                   Citizen.CreateThread(function()
-                    Citizen.Wait(Config.Timings.postPullCheck) 
+                    Citizen.Wait(Config.Timings.postPullCheck)
 
                     if DoesEntityExist(occ) and DoesEntityExist(pullVeh) then
                       local speed = GetEntitySpeed(pullVeh)
@@ -2949,25 +2742,22 @@ Citizen.CreateThread(function()
                       if speed < 1.0 then
                         dprint("Finish Pull-Over: wander didn't start — using drive-to-coord fallback")
 
-                        
                         local dest = GetOffsetFromEntityInWorldCoords(pullVeh, 0.0, 200.0, 0.0)
-                        
-                        
+
                         local model = GetEntityModel(pullVeh)
                         TaskVehicleDriveToCoord(occ, pullVeh, dest.x, dest.y, dest.z, 20.0, 1.0, model, 786603, 5.0, true)
 
-                        
                         Citizen.Wait(8000)
                         if DoesEntityExist(occ) then SetPedKeepTask(occ, false) end
                       else
-                        
+
                         Citizen.Wait(5000)
                         if DoesEntityExist(occ) then SetPedKeepTask(occ, false) end
                       end
                     end
                   end)
                 else
-                  
+
                   SetVehicleEngineOn(pullVeh, true, true, true)
                   SetVehicleHandbrake(pullVeh, false)
                   SetVehicleDoorsLocked(pullVeh, 1)
@@ -2992,7 +2782,7 @@ Citizen.CreateThread(function()
                       local veh = ensureTargetVehicle()
                       ejectAll(veh)
                     end },
-                  
+
                 }
               })
             else
@@ -3017,8 +2807,6 @@ Citizen.CreateThread(function()
               })
             end)
 
-
-
             RegisterNetEvent('az-police:receiveAIDispatch', function(service, callerServerId)
               local s = tostring(service or ""):lower()
               local mapping = {
@@ -3030,42 +2818,35 @@ Citizen.CreateThread(function()
 
               local fn = mapping[s]
               if not fn then
-                
+
                 if notify then notify("ai_dispatch_bad","Dispatch","Unknown service: "..tostring(service), 'error') end
                 return
               end
 
-              
               Citizen.CreateThread(function()
-                Citizen.Wait(Config.Timings.cleanupDelay) 
+                Citizen.Wait(Config.Timings.cleanupDelay)
                 if notify then notify("ai_dispatch_recv","Dispatch","AI "..s.." requested; responding now.", 'inform') end
-                pcall(fn) 
+                pcall(fn)
               end)
             end)
 
-
-
             RegisterNUICallback('createRecord', function(data, cb)
-              
+
               TriggerServerEvent('mdt:createRecord', data)
               cb('ok')
             end)
 
-
             RegisterNUICallback('listRecords', function(data, cb)
-              
+
               TriggerServerEvent('mdt:listRecords', data)
               cb('ok')
             end)
 
-
-
-
             RegisterNetEvent('mdt:recordsResult', function(records, target_type, target_value)
-              
+
               if target_type == 'plate' then
                 lastPlateHistory = lastPlateHistory or {}
-                
+
                 if target_value and target_value ~= "" then
                   local found = false
                   for _, v in ipairs(lastPlateHistory) do if v == target_value then found = true; break end end
@@ -3080,7 +2861,6 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               SendNUIMessage({
                 action       = 'recordsResult',
                 records      = records or {},
@@ -3088,10 +2868,8 @@ Citizen.CreateThread(function()
                 target_value = target_value or ''
               })
 
-              
               print(('[mdt] forwarded %d MDT record(s) for %s=%s to NUI'):format((records and #records) or 0, tostring(target_type), tostring(target_value)))
             end)
-
 
             RegisterNUICallback('lookupPlate', function(data, cb)
               if data.plate and data.plate:match("%S+") then lastPlate = data.plate:upper() end
@@ -3214,14 +2992,13 @@ Citizen.CreateThread(function()
 
             RegisterNetEvent('mdt:recordsResult')
             AddEventHandler('mdt:recordsResult', function(rows, targetType)
-              
+
               SendNUIMessage({
                 action = 'recordsResult',
                 records = rows,
                 target_type = targetType
               })
             end)
-
 
             RegisterNetEvent('mdt:reportsResult', function(records)
               SendNUIMessage({ action='reportsResult', records = records or {} })
@@ -3304,13 +3081,37 @@ Citizen.CreateThread(function()
 
             RegisterCommand('toggleMDT', toggleMDT)
             RegisterKeyMapping('toggleMDT','Open/Close MDT','keyboard','B')
-            RegisterCommand('aipolicemenu', function() if lib and lib.showContext then lib.showContext('police_mainai') else dprint("policemenu: lib.showContext missing") end end)
-            RegisterKeyMapping('aipolicemenu','Open Police Actions','keyboard','F6')
 
+            local policeMenuBusy = false
+
+            local function isPoliceMenuJob(job)
+              if not job then return false end
+              local list = (Config and Config.PoliceMenuJobs) or { 'police' }
+              for _,j in ipairs(list) do
+                if job == j then return true end
+              end
+              return false
+            end
+
+            local function tryOpenPoliceMenu()
+              if policeMenuBusy then return end
+              policeMenuBusy = true
+              getPlayerJobFromServer(function(job)
+                policeMenuBusy = false
+                if not isPoliceMenuJob(job) then return end
+                if lib and lib.showContext then
+                  lib.showContext('police_mainai')
+                end
+              end)
+            end
+            RegisterCommand('aipolicemenu', function()
+              tryOpenPoliceMenu()
+            end)
+            RegisterKeyMapping('aipolicemenu','Open Police Actions','keyboard','F6')
 
             RegisterCommand('stopAI', function()
               local player = PlayerPedId()
-              if not IsControlPressed(0, 21) then 
+              if not IsControlPressed(0, 21) then
                 if type(notify) == "function" then
                   notify("stop_require", "Hold Modifier", "You must start holding LEFT SHIFT while pressing E to initiate a stop.", 'warning', 'ban', '#DD6B20')
                 end
@@ -3318,7 +3119,7 @@ Citizen.CreateThread(function()
               end
 
               local holdStart = GetGameTimer()
-              local holdDuration = 3000 
+              local holdDuration = 3000
 
               if type(notify) == "function" then
                 notify("stop_hold", "Preparing Stop", "Keep holding LEFT SHIFT for 3 seconds to confirm the stop...", 'inform', 'hourglass', '#4299E1')
@@ -3334,7 +3135,6 @@ Citizen.CreateThread(function()
                 Citizen.Wait(Config.Timings.shortWait)
               end
 
-              
               local inVeh = IsPedInAnyVehicle(player, false)
               if inVeh and type(inEmergencyVehicle) == 'function' and inEmergencyVehicle() then
                 if type(attemptPullOverAI) == 'function' then
@@ -3346,9 +3146,7 @@ Citizen.CreateThread(function()
                 end
               end
             end)
-            RegisterKeyMapping('stopAI', 'Stop/Traffic Stop (Hold LEFT SHIFT + E for 3s)', 'keyboard', 'E')RegisterKeyMapping('stopAI', 'Stop/Traffic Stop (LEFT SHIFT + E)', 'keyboard', 'E')
-
-
+            RegisterKeyMapping('stopAI', 'Stop/Traffic Stop (Hold LEFT SHIFT + E for 3s)', 'keyboard', 'E')
 
             RegisterCommand('cancelStopsCmd', function()
               cancelNonForcedStops()
@@ -3361,7 +3159,7 @@ Citizen.CreateThread(function()
             Citizen.CreateThread(function()
               while true do
                 Citizen.Wait(0)
-                if IsControlJustReleased(0,249) then 
+                if IsControlJustReleased(0,249) then
                   dprint("G pressed -> tryCuffPed")
                   tryCuffPed()
                 end
@@ -3567,7 +3365,6 @@ Citizen.CreateThread(function()
               lastPedEntity = nil
             end
 
-
             function releasePedDriveAway()
               dprint("releasePedDriveAway called")
               local ped, nid = resolveLastPed()
@@ -3576,13 +3373,12 @@ Citizen.CreateThread(function()
                 return notify("rel_no","No Ped","None stopped.",'error','unlock','#E53E3E')
               end
 
-              
               if IsPedInAnyVehicle(ped, false) then
                 local veh = GetVehiclePedIsIn(ped, false)
                 if veh and veh ~= 0 and DoesEntityExist(veh) then
                   local driver = GetPedInVehicleSeat(veh, -1)
                   if driver == ped then
-                    
+
                     NetworkRequestControlOfEntity(veh)
                     NetworkRequestControlOfEntity(ped)
                     local start = GetGameTimer()
@@ -3591,20 +3387,19 @@ Citizen.CreateThread(function()
                       Citizen.Wait(10)
                     end
 
-                    
                     ClearPedTasksImmediately(ped)
                     SetVehicleEngineOn(veh, true, true, true)
                     SetVehicleHandbrake(veh, false)
                     SetVehicleDoorsLocked(veh, 1)
                     SetPedCanRagdoll(ped, true)
-                    
+
                     SetEnableHandcuffs(ped, false)
                     SetBlockingOfNonTemporaryEvents(ped, false)
                     SetPedCanRagdoll(ped, true)
                     SetPedKeepTask(ped, false)
                     Citizen.Wait(Config.Timings.shortWait)
                     SetPedKeepTask(ped, true)
-                    
+
                     local netId_local = safePedToNet(ped) or tostring(ped)
                     if pedData and pedData[tostring(netId_local)] and (pedData[tostring(netId_local)].wanted or pedData[tostring(netId_local)].suspended) then
                       if not attemptPedAttack(ped, veh, netId_local) then
@@ -3614,8 +3409,6 @@ Citizen.CreateThread(function()
                       TaskVehicleDriveWander(ped, veh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
                     end
 
-
-                    
                     SetEntityAsNoLongerNeeded(veh)
                     SetEntityAsNoLongerNeeded(ped)
 
@@ -3624,18 +3417,16 @@ Citizen.CreateThread(function()
                     lastPedEntity = nil
                     return
                   else
-                    
+
                     dprint("releasePedDriveAway: target is a passenger; will not warp to driver. Using standard release flow.")
                     return releasePed()
                   end
                 end
               end
 
-              
               dprint("releasePedDriveAway: ped not in vehicle, using standard releasePed()")
               releasePed()
             end
-
 
             function tryCuffPed()
               dprint("tryCuffPed called")
@@ -3679,7 +3470,6 @@ Citizen.CreateThread(function()
                 return notify("cuff_cancel","Canceled","Aborted.",'warning','ban','#DD6B20')
               end
 
-              
               NetworkRequestControlOfEntity(ped)
               local ctrlStart = GetGameTimer()
               while not NetworkHasControlOfEntity(ped) and (GetGameTimer() - ctrlStart) < 1000 do
@@ -3690,7 +3480,6 @@ Citizen.CreateThread(function()
                 dprint("tryCuffPed: WARNING - could not obtain network control of ped, continuing anyway")
               end
 
-              
               local dict = "mp_arresting"
               RequestAnimDict(dict)
               local loadStart = GetGameTimer()
@@ -3701,7 +3490,6 @@ Citizen.CreateThread(function()
                 dprint("tryCuffPed: failed to load anim dict " .. tostring(dict))
               end
 
-              
               if IsPedInAnyVehicle(ped, false) then
                 local veh = GetVehiclePedIsIn(ped, false)
                 if veh and veh ~= 0 then
@@ -3713,16 +3501,14 @@ Citizen.CreateThread(function()
                 end
               end
 
-              
               ClearPedTasksImmediately(ped)
               ClearPedSecondaryTask(ped)
               Citizen.Wait(Config.Timings.shortWait)
 
-              
               local played = false
               for attempt = 1, 3 do
                 TaskPlayAnim(ped, dict, "idle", 8.0, -8.0, -1, 49, 0, false, false, false)
-                Citizen.Wait(150) 
+                Citizen.Wait(150)
                 if IsEntityPlayingAnim(ped, dict, "idle", 3) then
                   played = true
                   break
@@ -3734,11 +3520,9 @@ Citizen.CreateThread(function()
 
               if not played then
                 dprint("tryCuffPed: WARNING - animation didn't start; will still apply cuff state")
-                
-                
+
               end
 
-              
               SetEnableHandcuffs(ped, true)
               SetBlockingOfNonTemporaryEvents(ped, true)
               SetPedCanRagdoll(ped, false)
@@ -3748,7 +3532,6 @@ Citizen.CreateThread(function()
               draggedPed = ped
               isDragging = false
 
-              
               local sendNet = nil
               if lastPedNetId then
                 sendNet = lastPedNetId
@@ -3760,7 +3543,6 @@ Citizen.CreateThread(function()
               dprint("tryCuffPed: sending server event police:cuffPed with", tostring(sendNet))
               TriggerServerEvent('police:cuffPed', sendNet)
             end
-
 
             function toggleDragPed()
               dprint("toggleDragPed called, draggedPed=", tostring(draggedPed))
@@ -3824,14 +3606,10 @@ Citizen.CreateThread(function()
               dprint("seatPed: seated ped into vehicle", tostring(veh), "seat", tostring(idx))
             end
 
-
-
-            local SCAN_INTERVAL = 5000 
+            local SCAN_INTERVAL = 5000
             local TARGET_DISTANCE = 2.5
 
-
             local registeredNetIds = {}
-
 
             local function getAllPeds()
                 local peds = {}
@@ -3849,29 +3627,18 @@ Citizen.CreateThread(function()
                 return peds
             end
 
-
             local function netIdExists(netId)
                 if not netId or netId == 0 then return false end
                 local ent = safeNetworkGetEntityFromNetworkId(netId)
                 return ent and ent ~= 0 and DoesEntityExist(ent)
             end
 
-
             RegisterNetEvent('az-police:openMenu', function()
-                if lib and lib.showContext then
-                    lib.showContext('police_mainai')
-                else
-                    print("^1[az-police]^7 lib.showContext missing")
-                end
+                tryOpenPoliceMenu()
             end)
 
-
             RegisterCommand('policemenu', function()
-                if lib and lib.showContext then
-                    lib.showContext('police_mainai')
-                else
-                    print("^1[policemenu]^7 lib.showContext missing")
-                end
+                tryOpenPoliceMenu()
             end, false)
 
             CreateThread(function()
@@ -3882,26 +3649,19 @@ Citizen.CreateThread(function()
                         icon = 'fa-solid fa-clipboard-list',
                         distance = TARGET_DISTANCE or 2.5,
                         onSelect = function(data)
-                            if lib and lib.showContext then
-                                lib.showContext('police_mainai')
-                            else
-                                dprint("policemenu: lib.showContext missing")
-                            end
+                            tryOpenPoliceMenu()
                         end
                     }
                 }
 
-                
                 Citizen.Wait(2000)
                 pcall(function() exports.ox_target:addGlobalPed(options) end)
             end)
-
 
             AddEventHandler('onResourceStop', function(resName)
                 if GetCurrentResourceName() ~= resName then return end
                 pcall(function() exports.ox_target:removeGlobalPed({'open_police_menu'}) end)
             end)
-
 
             AddEventHandler("onResourceStop", function(resName)
               if GetCurrentResourceName() ~= resName then return end
@@ -3918,10 +3678,6 @@ Citizen.CreateThread(function()
                 pullVeh = nil
               end
             end)
-
-
-
-
 
             local function getNearbyDownedPeds(center, radius, onlyHuman)
               local found = {}
@@ -3968,7 +3724,6 @@ Citizen.CreateThread(function()
               return found
             end
 
-
             local function requestControl(ent, timeout)
               timeout = timeout or 1000
               local t0 = GetGameTimer()
@@ -3981,7 +3736,6 @@ Citizen.CreateThread(function()
               print((" [AI DEBUG] requestControl(%s) -> %s (took %dms)"):format(tostring(ent), tostring(ok), GetGameTimer()-t0))
               return ok
             end
-
 
             local function forcePedExitVehicle(ped, vehicle)
               if not DoesEntityExist(ped) then return false end
@@ -4000,7 +3754,7 @@ Citizen.CreateThread(function()
                 end
               end
               if not ok then
-                
+
                 if DoesEntityExist(vehicle) then
                   local vcoords = GetEntityCoords(vehicle)
                   local ox, oy, oz = table.unpack(GetOffsetFromEntityInWorldCoords(vehicle, 1.0, 0.0, 0.0))
@@ -4013,26 +3767,22 @@ Citizen.CreateThread(function()
               return ok
             end
 
-
-            local REVIVE_CHANCE = 65     
-            local SERVICE_TIME_MS = 6000 
+            local REVIVE_CHANCE = 65
+            local SERVICE_TIME_MS = 6000
 
             local function handleCasualtyInteraction(responderPed, vehicle, casualty)
               print((" [AI DEBUG] handleCasualtyInteraction: responder=%s vehicle=%s casualty=%s"):format(tostring(responderPed), tostring(vehicle), tostring(casualty)))
               if not DoesEntityExist(responderPed) then print(" [AI DEBUG] responder does not exist") return end
               if not DoesEntityExist(casualty) then print(" [AI DEBUG] casualty does not exist") return end
 
-              
               requestControl(responderPed, 2000)
 
-              
               if IsPedInAnyVehicle(responderPed, false) then
                 print(" [AI DEBUG] responder is in vehicle, forcing exit...")
                 forcePedExitVehicle(responderPed, vehicle)
                 Citizen.Wait(200)
               end
 
-              
               TaskGoToEntity(responderPed, casualty, -1, 2.0, 2.0, 1073741824, 0)
               local approachStart = GetGameTimer()
               while GetGameTimer() - approachStart < 12000 do
@@ -4046,7 +3796,6 @@ Citizen.CreateThread(function()
               end
               print(" [AI DEBUG] responder reached casualty (or timed out) distance:", #(GetEntityCoords(responderPed) - GetEntityCoords(casualty)))
 
-              
               local ccoords = GetEntityCoords(casualty)
               TaskTurnPedToFaceCoord(responderPed, ccoords.x, ccoords.y, ccoords.z, 500)
               if requestControl(responderPed, 500) then
@@ -4058,7 +3807,6 @@ Citizen.CreateThread(function()
               ClearPedTasksImmediately(responderPed)
               print(" [AI DEBUG] finished treatment wait, evaluating outcome...")
 
-              
               math.randomseed(math.floor(GetGameTimer() + GetEntityCoords(responderPed).x * 1000))
               local roll = math.random(1, 100)
               print((" [AI DEBUG] revive roll=%d (need <= %d to revive)"):format(roll, REVIVE_CHANCE))
@@ -4087,9 +3835,6 @@ Citizen.CreateThread(function()
               end
             end
 
-
-
-
             if type(handleCasualtyInteraction) == 'function' then
               _G.handleCasualtyInteraction = handleCasualtyInteraction
               if _G.__ai_casualty_queue and #_G.__ai_casualty_queue > 0 then
@@ -4102,15 +3847,6 @@ Citizen.CreateThread(function()
                 _G.__ai_casualty_queue = nil
               end
             end
-
-
-
-
-
-
-
-
-
 
             RegisterCommand('debugDownedSearch', function()
               local ped = PlayerPedId()
@@ -4126,12 +3862,11 @@ Citizen.CreateThread(function()
               end
             end, false)
 
-
             RegisterCommand('forceAIMedicResponse', function()
               local player = PlayerPedId()
               local px,py,pz = table.unpack(GetEntityCoords(player))
               print(" [AI DEBUG CMD] forceAIMedicResponse triggered at:", px,py,pz)
-              
+
               local handle, veh = FindFirstVehicle()
               local success = true
               local bestVeh = nil
@@ -4156,7 +3891,6 @@ Citizen.CreateThread(function()
               if not DoesEntityExist(driver) then print(" [AI DEBUG CMD] No driver in chosen vehicle") end
               print((" [AI DEBUG CMD] Selected vehicle %s at dist=%.1f with driver %s"):format(tostring(bestVeh), bestDist, tostring(driver)))
 
-              
               local vcoords = GetEntityCoords(bestVeh)
               local casualties = getNearbyDownedPeds(vcoords, 30.0, nil)
               print((" [AI DEBUG CMD] Found %d casualties near vehicle"):format(#casualties))
@@ -4179,9 +3913,6 @@ Citizen.CreateThread(function()
 
             RegisterKeyMapping('debugDownedSearch', 'AI Debug: list downed peds near player', 'keyboard', '')
 
-
-
-            -- put this once (near the bottom, after repositionInteractive is defined)
             RegisterCommand('repositionVeh', function()
               dprint("repositionVeh keybind triggered, pullVeh=" .. tostring(pullVeh))
               if pullVeh and DoesEntityExist(pullVeh) then
@@ -4196,5 +3927,40 @@ Citizen.CreateThread(function()
         else
             print("[Az-FR | CALLOUT System] You are not an allowed department.")
         end
-    end)
+    end
+
+    Wait(200) -- allow exports to init (JIP-safe)
+
+    local function getJobSync(timeoutMs)
+        local job, done = nil, false
+        getPlayerJobFromServer(function(j)
+            job = j
+            done = true
+        end)
+        local untilT = GetGameTimer() + (timeoutMs or 4000)
+        while (not done) and (GetGameTimer() < untilT) do
+            Wait(25)
+        end
+        return job
+    end
+
+    local tries = 0
+    while true do
+        tries = tries + 1
+        local job = getJobSync(5000)
+
+        if job == nil then
+            if (tries % 10) == 1 then
+                print("[Az-FR | CALLOUT System] Waiting for framework job (join-in-progress)... attempt " .. tostring(tries))
+            end
+        elseif not isJobAllowed(job) then
+            print("[Az-FR | CALLOUT System] You are not an allowed department (" .. tostring(job) .. ").")
+            return
+        else
+            __az5pd_init(job)
+            return
+        end
+
+        Wait(1000)
+    end
 end)

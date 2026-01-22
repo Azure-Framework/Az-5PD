@@ -1,0 +1,30 @@
+return {
+  title = "Residential Alarm",
+  description = "Alarm company reports a triggered residential alarm.",
+  server = {
+    getCoords = function()
+      local base = { x = -1047.0, y = 312.0, z = 65.9 }
+      local rx = base.x + math.random(-18,18)
+      local ry = base.y + math.random(-18,18)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local owner = GetHashKey("a_m_m_bevhills_01")
+        RequestModel(owner)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(owner) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, owner, coords.x, coords.y, coords.z+0.5, 0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskStartScenarioInPlace(ped, "WORLD_HUMAN_STAND_MOBILE", 0, true) -- homeowner on phone
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

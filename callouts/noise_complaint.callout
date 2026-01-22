@@ -1,0 +1,37 @@
+return {
+  title = "Noise Complaint",
+  description = "Neighbors report loud music and yelling.",
+  server = {
+    getCoords = function()
+      local base = { x = -912.0, y = -365.0, z = 38.0 }
+      local rx = base.x + math.random(-20,20)
+      local ry = base.y + math.random(-20,20)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedHash = GetHashKey("a_m_y_hipster_02")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskStartScenarioInPlace(ped, "WORLD_HUMAN_PARTYING", 0, true)
+          Citizen.CreateThread(function()
+            local start = GetGameTimer()
+            while DoesEntityExist(ped) and GetGameTimer()-start < 30000 do
+              Citizen.Wait(math.random(2000,4000))
+              PlayPain(ped, 6, 0)
+            end
+          end)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

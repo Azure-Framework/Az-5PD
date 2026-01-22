@@ -1,0 +1,37 @@
+return {
+  title = "Person in Crisis",
+  description = "Caller reports a person in mental health crisis, unarmed, agitated.",
+  server = {
+    getCoords = function()
+      local base = { x = 187.0, y = -920.0, z = 30.7 }
+      local rx = base.x + math.random(-25,25)
+      local ry = base.y + math.random(-25,25)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedHash = GetHashKey("a_m_m_skidrow_01")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskStartScenarioInPlace(ped, "WORLD_HUMAN_STAND_IMPATIENT", 0, true)
+          Citizen.CreateThread(function()
+            local start = GetGameTimer()
+            while DoesEntityExist(ped) and GetGameTimer()-start < 30000 do
+              Citizen.Wait(math.random(2000,4000))
+              PlayPain(ped, 7, 0)
+            end
+          end)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

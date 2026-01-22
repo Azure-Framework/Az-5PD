@@ -1,0 +1,32 @@
+return {
+  title = "Person with a Knife",
+  description = "Caller reports a person brandishing a knife and threatening people.",
+  server = {
+    getCoords = function()
+      local base = { x = 300.0, y = -1000.0, z = 29.3 }
+      local rx = base.x + math.random(-30,30)
+      local ry = base.y + math.random(-30,30)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      return function(coords)
+        local pedHash = GetHashKey("a_m_y_hipster_01")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          GiveWeaponToPed(ped, GetHashKey("WEAPON_KNIFE"), 1, false, true)
+          SetBlockingOfNonTemporaryEvents(ped, true)
+          SetPedKeepTask(ped, true)
+          TaskCombatPed(ped, PlayerPedId(), 0, 16)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

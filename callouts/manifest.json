@@ -1,6 +1,25 @@
 [
-  "drunk_driver.callout",
   "dog_attack.callout",
+  "domestic_violence.callout",
+  "drunk_driver.callout",
+  "fight_in_progress.callout",
+  "missing_person.callout",
+  "noise_complaint.callout",
+  "overdose_medical.callout",
+  "person_in_crisis.callout",
+  "person_with_knife.callout",
+  "public_intox.callout",
+  "reckless_driver.callout",
+  "residential_alarm.callout",
+  "residential_burglary.callout",
+  "road_hazard.callout",
+  "robbery_in_progress.callout",
+  "shoplifter_detained.callout",
   "shots_fired.callout",
-  "test_1_attack.callout"
+  "suspicious_person.callout",
+  "suspicious_vehicle.callout",
+  "traffic_collision.callout",
+  "vehicle_burglary.callout",
+  "welfare_check.callout",
+  "yelling_person.callout"
 ]

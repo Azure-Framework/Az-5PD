@@ -1,0 +1,47 @@
+return {
+  title = "Residential Burglary",
+  description = "Caller sees a suspect sneaking around a home.",
+  server = {
+    getCoords = function()
+      local base = { x = -776.0, y = 312.0, z = 85.7 }
+      local rx = base.x + math.random(-20,20)
+      local ry = base.y + math.random(-20,20)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function dist(ax,ay,az, bx,by,bz)
+        local dx,dy,dz = ax-bx, ay-by, (az or 0.0)-(bz or 0.0)
+        return math.sqrt(dx*dx+dy*dy+dz*dz)
+      end
+      return function(coords)
+        local pedHash = GetHashKey("a_m_y_methhead_01")
+        RequestModel(pedHash)
+        local t0 = GetGameTimer()
+        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        if DoesEntityExist(ped) then
+          SetEntityAsMissionEntity(ped,true,true)
+          RequestAnimSet("move_m@stealth")
+          while not HasAnimSetLoaded("move_m@stealth") do Citizen.Wait(10) end
+          SetPedMovementClipset(ped, "move_m@stealth", 1.0)
+          SetBlockingOfNonTemporaryEvents(ped,true)
+          TaskWanderStandard(ped, 2.0, 10)
+          Citizen.CreateThread(function()
+            while DoesEntityExist(ped) do
+              Citizen.Wait(700)
+              local p = GetEntityCoords(PlayerPedId())
+              if dist(p.x,p.y,p.z, coords.x,coords.y,coords.z) < 12.0 then
+                TaskSmartFleePed(ped, PlayerPedId(), 60.0, -1, true, true)
+                break
+              end
+            end
+          end)
+        end
+        return { ped }
+      end
+    ]]
+  }
+}

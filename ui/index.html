@@ -1,62 +1,544 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta
-    http-equiv="Content-Security-Policy"
-    content="
-      default-src 'self';
-      script-src  'self' 'unsafe-inline';
-      style-src   'self' 'unsafe-inline';
-      img-src     'self' data:;
-      connect-src 'self' https://*;
-    "
-  />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*;" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>NCIC MDT - Police Terminal</title>
-<link rel="stylesheet" href="styles.css">
-<style>
-/* Minimal styles to support collapsible record details */
-.record { border-radius:8px; padding:8px; margin:8px 0; background: #0b1012; border:1px solid rgba(255,255,255,0.03); display:block; }
-.record .record-summary { display:flex; gap:12px; align-items:center; justify-content:space-between; cursor:pointer; }
-.record .record-left { display:flex; gap:12px; align-items:center; }
-.record .record-label { font-size:11px; color:var(--muted); }
-.record .record-value { font-weight:600; font-size:13px; color:var(--text); }
-.record .record-details { display:none; margin-top:10px; padding-top:8px; border-top:1px dashed rgba(255,255,255,0.03); color:var(--muted); }
-.record.open .record-details { display:block; }
-.record .toggle-icon { width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; border-radius:6px; background:rgba(255,255,255,0.02); color:var(--muted); font-size:12px; }
-.results-title.small { font-size:12px; margin-bottom:6px; }
-.tiny-meta { font-size:12px; color:var(--muted); }
-</style>
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    :root {
+      --primary: #1a5fb4;
+      --primary-dark: #154380;
+      --accent: #26a269;
+      --accent-dark: #1e824c;
+      --danger: #c01c28;
+      --warning: #e5a50a;
+      --text: #ffffff;
+      --text-muted: #9f9f9f;
+      --bg: #0b1012;
+      --panel: #161a1d;
+      --border: #2a2e32;
+      --success: #2ec27e;
+    }
+
+    /* Compact layout */
+    #app {
+      width: 820px;
+      height: 580px;
+      font-size: 13px;
+      position: absolute;
+      left: 50%;
+      top: 5%;
+      transform: translateX(-50%);
+    }
+
+    .content {
+      display: flex;
+      height: calc(100% - 50px);
+    }
+
+    /* Improved navigation */
+    nav {
+      width: 140px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      padding: 10px 0;
+    }
+
+    nav button {
+      text-align: left;
+      padding: 10px 12px;
+      margin: 2px 8px;
+      border-radius: 4px;
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: all 0.2s;
+    }
+
+    nav button:hover {
+      background: rgba(255,255,255,0.05);
+    }
+
+    nav button.active {
+      background: var(--primary);
+      color: white;
+    }
+
+    .kbd {
+      font-size: 10px;
+      padding: 2px 4px;
+      background: rgba(0,0,0,0.3);
+      border-radius: 3px;
+    }
+
+    /* Main content area */
+    .pane {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      padding: 10px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .form-group label {
+      font-size: 11px;
+      margin-bottom: 4px;
+      color: var(--text-muted);
+    }
+
+    .form-group input, .form-group select, .form-group input[type="number"] {
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.3);
+      color: var(--text);
+    }
+
+    .btn {
+      padding: 6px 12px;
+      background: var(--primary);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    .btn:hover {
+      background: var(--primary-dark);
+    }
+
+    .btn-compose {
+      background: var(--accent);
+    }
+
+    .btn-compose:hover {
+      background: var(--accent-dark);
+    }
+
+    .tiny-btn {
+      padding: 4px 8px;
+      background: rgba(255,255,255,0.1);
+      color: var(--text);
+      border: none;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    /* Results area */
+    .results {
+      flex: 1;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .results-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 8px 12px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .results-title {
+      font-weight: bold;
+      color: var(--text);
+    }
+
+    .scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    /* Improved dispatch list */
+    .dispatch-item {
+      padding: 10px;
+      margin-bottom: 8px;
+      background: var(--panel);
+      border-radius: 4px;
+      border-left: 3px solid var(--primary);
+    }
+
+    .dispatch-item.urgent {
+      border-left-color: var(--danger);
+    }
+
+    .dispatch-header {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 6px;
+    }
+
+    .dispatch-caller {
+      font-weight: bold;
+    }
+
+    .dispatch-location {
+      color: var(--accent);
+    }
+
+    .dispatch-time {
+      color: var(--text-muted);
+      font-size: 11px;
+    }
+
+    .dispatch-message {
+      margin: 6px 0;
+      line-height: 1.4;
+    }
+
+    .dispatch-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 6px;
+    }
+
+    /* Record styling */
+    .record {
+      padding: 10px;
+      margin-bottom: 8px;
+      background: var(--panel);
+      border-radius: 4px;
+      border: 1px solid var(--border);
+    }
+
+    .record-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+      gap: 10px;
+    }
+
+    .record-field {
+      display: flex;
+      flex-direction: column;
+    }
+
+    .record-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+
+    .record-value {
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .no-results {
+      text-align: center;
+      color: var(--text-muted);
+      padding: 20px;
+    }
+
+    /* Status indicators */
+    .status {
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-size: 11px;
+      font-weight: bold;
+    }
+
+    .status.valid, .status.active {
+      background: var(--success);
+      color: white;
+    }
+
+    .status.expired, .status.suspended {
+      background: var(--danger);
+      color: white;
+    }
+
+    .status.warning {
+      background: var(--warning);
+      color: black;
+    }
+
+    /* Settings modal */
+    #settings-modal {
+      display: none;
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0,0,0,0.7);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+
+    #settings-modal.active {
+      display: flex;
+    }
+
+    .settings-content {
+      width: 520px;
+      background: var(--bg);
+      border-radius: 6px;
+      padding: 20px;
+      box-shadow: 0 5px 15px rgba(0,0,0,0.5);
+    }
+
+    .settings-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .color-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+
+    .color-item {
+      display: flex;
+      align-items: center;
+    }
+
+    .color-item label {
+      width: 120px;
+    }
+
+    .color-preview {
+      width: 20px;
+      height: 20px;
+      border-radius: 3px;
+      margin-right: 8px;
+      border: 1px solid var(--border);
+    }
+
+    .settings-actions {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      margin-top: 15px;
+      align-items: center;
+    }
+
+    /* Compose modal */
+    #compose-modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      z-index: 100000;
+      background: rgba(2,8,10,0.75);
+      align-items: center;
+      justify-content: center;
+    }
+
+    #compose-modal {
+      width: 640px;
+      max-width: 95%;
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+      padding: 18px;
+    }
+
+    /* Header improvements */
+    #app-header {
+      padding: 8px 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--primary);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge-icon, .brand-logo {
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 12px;
+      color: var(--primary);
+      background: white;
+      overflow: hidden;
+    }
+    .brand-logo img { width:100%; height:100%; object-fit:cover; }
+
+    .header-status {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--success);
+    }
+
+    .close-btn, .settings-btn {
+      background: none;
+      border: none;
+      color: white;
+      cursor: pointer;
+      font-size: 16px;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 3px;
+    }
+
+    .close-btn:hover, .settings-btn:hover {
+      background: rgba(255,255,255,0.1);
+    }
+
+    /* Panel forms */
+    .panel-form {
+      padding: 12px;
+      background: rgba(0,0,0,0.1);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .form-row {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .form-row .form-group {
+      flex: 1;
+    }
+
+    textarea {
+      min-height: 60px;
+      resize: vertical;
+      padding: 6px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: rgba(0,0,0,0.3);
+      color: var(--text);
+      font-family: inherit;
+    }
+
+    /* Resize grip */
+    .resize-grip {
+      position: absolute;
+      bottom: 0;
+      right: 0;
+      width: 15px;
+      height: 15px;
+      cursor: nw-resize;
+      background: linear-gradient(135deg, transparent 50%, var(--primary) 50%);
+    }
+
+    /* Collapsible records */
+    .record-summary {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      cursor: pointer;
+    }
+
+    .record-left {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .record-details {
+      display: none;
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px dashed rgba(255,255,255,0.1);
+      color: var(--text-muted);
+    }
+
+    .record.open .record-details {
+      display: block;
+    }
+
+    .toggle-icon {
+      width: 20px;
+      height: 20px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
+      background: rgba(255,255,255,0.05);
+      color: var(--text-muted);
+      font-size: 10px;
+    }
+
+    .tiny-meta {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+  </style>
+  <script src="config.js"></script>
 </head>
 <body>
   <div id="app" role="application" aria-label="NCIC MDT">
     <header id="app-header" data-tooltip="Drag to move — double click to center">
-      <div class="brand" style="min-width:220px">
-        <div class="badge-icon">LSPD</div>
+      <div class="brand">
+        <div class="badge-icon" id="brand-badge">LSPD</div>
+        <div class="brand-logo" id="brand-logo" style="display:none"><img id="brand-logo-img" alt="logo"/></div>
         <div>
-          <h1>NCIC — Mobile Data Terminal</h1>
-          <div class="sub">In-car terminal · Tactical access</div>
+          <h1 id="brand-title">NCIC — Mobile Data Terminal</h1>
+          <div class="sub" id="brand-subtitle">In-car terminal · Tactical access</div>
         </div>
       </div>
 
-      <div class="header-status" aria-hidden="false">
-        <div style="display:flex;align-items:center;gap:10px">
+      <div class="header-status">
+        <div style="display:flex;align-items:center;gap:6px">
           <div class="dot" title="Connection"></div>
           <div class="small muted">ONLINE</div>
-
         </div>
 
         <div class="field">
           <div class="label">Unit</div>
-          <div class="value">1-L-12</div>
+          <div class="value" id="unit-value">1-L-12</div>
         </div>
 
         <div class="field">
           <div class="label">Officer</div>
-          <div class="value">#3467</div>
+          <div class="value" id="officer-value">#3467</div>
         </div>
 
+        <button class="settings-btn" id="btn-settings" aria-label="Settings" data-tooltip="Settings">⚙</button>
         <button class="close-btn" id="btn-close" aria-label="Close MDT" data-tooltip="Close MDT (Esc)">✖</button>
       </div>
     </header>
@@ -74,45 +556,45 @@
       <!-- MAIN PANE -->
       <div class="pane">
         <!-- controls -->
-        <div class="controls" aria-hidden="false">
+        <div class="controls">
           <div class="form-group">
             <label for="plate-history">Search History</label>
-            <select id="plate-history" aria-label="Plate search history" data-tooltip="Recent plate searches">
+            <select id="plate-history" aria-label="Plate search history">
               <option value="">-- Select previous search --</option>
             </select>
           </div>
 
           <div class="form-group">
             <label for="id-history">ID History</label>
-            <select id="id-history" aria-label="ID search history" data-tooltip="Recent ID lookups">
+            <select id="id-history" aria-label="ID search history">
               <option value="">-- Select previous search --</option>
             </select>
           </div>
 
-          <div class="form-group wide">
+          <div class="form-group">
             <label for="plate-input">License Plate #</label>
-            <input id="plate-input" type="text" placeholder="Enter plate number or scan vehicle" autocomplete="off" data-tooltip="Enter license plate, then Run Plate Search" />
+            <input id="plate-input" type="text" placeholder="Enter plate number" autocomplete="off" />
           </div>
 
-          <div class="form-group wide">
+          <div class="form-group">
             <label for="id-input">First / LastName</label>
-            <input id="id-input" type="text" placeholder="Enter partial or full name here" autocomplete="off" data-tooltip="NetID or 'First Last' names accepted" />
+            <input id="id-input" type="text" placeholder="Enter name here" autocomplete="off" />
           </div>
 
-          <div style="grid-column:1/3;display:flex;gap:10px">
-            <button id="btn-plate" class="btn" data-tooltip="Lookup plate">Run Plate Search</button>
-            <button id="btn-id" class="btn" data-tooltip="Lookup ID">Run ID Search</button>
+          <div style="grid-column:1/3;display:flex;gap:8px">
+            <button id="btn-plate" class="btn">Run Plate Search</button>
+            <button id="btn-id" class="btn">Run ID Search</button>
           </div>
         </div>
 
         <!-- results -->
         <div class="results" role="region" aria-label="Results">
           <!-- Plate panel -->
-          <section id="panel-plate" class="panel active" style="display:flex;flex-direction:column;height:100%">
+          <section id="panel-plate" class="panel active">
             <div class="results-header">
               <div class="results-title">VEHICLE REGISTRATION RECORD</div>
-              <button class="btn-compose tiny-btn" data-tooltip="Compose record (C)">Compose</button>
-              <div id="id-status-indicator" class="status small">--</div>
+              <button class="btn btn-compose tiny-btn">Compose</button>
+              <div id="plate-status-indicator" class="status small">--</div>
             </div>
 
             <div id="plate-status" class="scroll">
@@ -121,11 +603,10 @@
           </section>
 
           <!-- ID panel -->
-          <section id="panel-id" class="panel" style="display:none;flex-direction:column;height:100%">
+          <section id="panel-id" class="panel" style="display:none">
             <div class="results-header">
               <div class="results-title">IDENTITY RECORD</div>
-              <!-- Compose button (use class btn-compose) -->
-              <button class="btn-compose tiny-btn" data-tooltip="Compose record (C)">Compose</button>
+              <button class="btn btn-compose tiny-btn">Compose</button>
               <div id="id-status-indicator" class="status small">--</div>
             </div>
 
@@ -135,7 +616,7 @@
           </section>
 
           <!-- Reports panel -->
-          <section id="panel-reports" class="panel" style="display:none;flex-direction:column;height:100%">
+          <section id="panel-reports" class="panel" style="display:none">
             <div class="results-header">
               <div class="results-title">REPORTS</div>
               <div class="status small">Records</div>
@@ -145,11 +626,11 @@
               <div class="form-row">
                 <div class="form-group">
                   <label for="report-title">Report Title</label>
-                  <input id="report-title" type="text" placeholder="Title" data-tooltip="Short title for the report" />
+                  <input id="report-title" type="text" placeholder="Title" />
                 </div>
                 <div class="form-group">
                   <label for="report-type">Report Type</label>
-                  <select id="report-type" data-tooltip="Report type">
+                  <select id="report-type">
                     <option>General</option>
                     <option>Traffic</option>
                     <option>Use of Force</option>
@@ -160,12 +641,12 @@
 
               <div class="form-group">
                 <label for="report-desc">Description</label>
-                <textarea id="report-desc" placeholder="Description..." data-tooltip="Describe the incident"></textarea>
+                <textarea id="report-desc" placeholder="Description..."></textarea>
               </div>
 
-              <div style="display:flex;gap:10px;margin-top:10px">
-                <button id="btn-create-report" class="btn" style="flex:1" data-tooltip="Create a new report">Create Report</button>
-                <button id="btn-list-reports" class="btn" style="flex:1" data-tooltip="Refresh report list">List Reports</button>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button id="btn-create-report" class="btn" style="flex:1">Create Report</button>
+                <button id="btn-list-reports" class="btn" style="flex:1">List Reports</button>
               </div>
             </div>
 
@@ -175,7 +656,7 @@
           </section>
 
           <!-- Warrants -->
-          <section id="panel-warrants" class="panel" style="display:none;flex-direction:column;height:100%">
+          <section id="panel-warrants" class="panel" style="display:none">
             <div class="results-header">
               <div class="results-title">WARRANTS</div>
               <div class="status small">Active / Inactive</div>
@@ -185,22 +666,22 @@
               <div class="form-row">
                 <div class="form-group">
                   <label for="warrant-subject">Subject Name</label>
-                  <input id="warrant-subject" type="text" placeholder="Subject Name" data-tooltip="Name to place on warrant" />
+                  <input id="warrant-subject" type="text" placeholder="Subject Name" />
                 </div>
                 <div class="form-group">
                   <label for="warrant-netid">NetID (optional)</label>
-                  <input id="warrant-netid" type="text" placeholder="NetID" data-tooltip="Optional NetID" />
+                  <input id="warrant-netid" type="text" placeholder="NetID" />
                 </div>
               </div>
 
               <div class="form-group">
                 <label for="warrant-charges">Charges / Details</label>
-                <textarea id="warrant-charges" placeholder="Charges / details..." data-tooltip="Charges or details for the warrant"></textarea>
+                <textarea id="warrant-charges" placeholder="Charges / details..."></textarea>
               </div>
 
-              <div style="display:flex;gap:10px;margin-top:10px">
-                <button id="btn-create-warrant" class="btn" style="flex:1" data-tooltip="Create a warrant">Create Warrant</button>
-                <button id="btn-list-warrants" class="btn" style="flex:1" data-tooltip="List Warrants">List Warrants</button>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button id="btn-create-warrant" class="btn" style="flex:1">Create Warrant</button>
+                <button id="btn-list-warrants" class="btn" style="flex:1">List Warrants</button>
               </div>
             </div>
 
@@ -210,7 +691,7 @@
           </section>
 
           <!-- Dispatch -->
-          <section id="panel-dispatch" class="panel" style="display:none;flex-direction:column;height:100%">
+          <section id="panel-dispatch" class="panel" style="display:none">
             <div class="results-header">
               <div class="results-title">DISPATCH / CALLS</div>
               <div class="status small">Live calls</div>
@@ -220,22 +701,22 @@
               <div class="form-row">
                 <div class="form-group">
                   <label for="dispatch-caller">Caller Name</label>
-                  <input id="dispatch-caller" type="text" placeholder="Caller Name" data-tooltip="Name of caller" />
+                  <input id="dispatch-caller" type="text" placeholder="Caller Name" />
                 </div>
                 <div class="form-group">
                   <label for="dispatch-location">Location</label>
-                  <input id="dispatch-location" type="text" placeholder="Location" data-tooltip="Location of the call" />
+                  <input id="dispatch-location" type="text" placeholder="Location" />
                 </div>
               </div>
 
               <div class="form-group">
                 <label for="dispatch-message">Message</label>
-                <textarea id="dispatch-message" placeholder="Message..." data-tooltip="Call details"></textarea>
+                <textarea id="dispatch-message" placeholder="Message..."></textarea>
               </div>
 
-              <div style="display:flex;gap:10px;margin-top:10px">
-                <button id="btn-create-dispatch" class="btn" style="flex:1" data-tooltip="Create dispatch call">Create Dispatch</button>
-                <button id="btn-list-dispatch" class="btn" style="flex:1" data-tooltip="List active calls">List Dispatch</button>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button id="btn-create-dispatch" class="btn" style="flex:1">Create Dispatch</button>
+                <button id="btn-list-dispatch" class="btn" style="flex:1">List Dispatch</button>
               </div>
             </div>
 
@@ -246,69 +727,130 @@
         </div>
       </div>
     </div>
-<!-- Compose Modal container (hidden by default) -->
-<div id="compose-modal-backdrop" style="display:none;position:fixed;inset:0;z-index:100000;background:rgba(2,8,10,0.75);align-items:center;justify-content:center;">
-  <div id="compose-modal" style="width:640px;max-width:95%;border-radius:8px;background:var(--panel);box-shadow:0 10px 40px rgba(0,0,0,0.6);padding:18px;">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-      <div style="display:flex;flex-direction:column">
-        <div style="color:var(--accent);font-weight:700">Compose Record</div>
-        <div style="color:var(--muted);font-size:12px">Create Arrest / Ticket / Note linked to a plate or ID</div>
-      </div>
-      <div>
-        <button id="compose-close" class="tiny-btn">Close</button>
+
+    <!-- Compose Modal -->
+    <div id="compose-modal-backdrop" style="display:none">
+      <div id="compose-modal">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div style="display:flex;flex-direction:column">
+            <div style="color:var(--accent);font-weight:700">Compose Record</div>
+            <div style="color:var(--muted);font-size:12px">Create Arrest / Ticket / Note linked to a plate or ID</div>
+          </div>
+          <div>
+            <button id="compose-close" class="tiny-btn">Close</button>
+          </div>
+        </div>
+
+        <div class="panel-form" style="padding:12px;background:transparent;border:none">
+          <div style="display:flex;gap:10px;margin-bottom:8px">
+            <div style="flex:1">
+              <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Record Type</label>
+              <select id="compose-type" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text)">
+                <option value="arrest">Arrest</option>
+                <option value="ticket">Ticket</option>
+                <option value="note">Note</option>
+              </select>
+            </div>
+
+            <div style="width:180px">
+              <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Target</label>
+              <select id="compose-target-type" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text)">
+                <option value="plate">Plate</option>
+                <option value="netid">NetID</option>
+                <option value="name">Name</option>
+              </select>
+            </div>
+          </div>
+
+          <div style="margin-bottom:8px">
+            <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Target Value (plate / netId / name)</label>
+            <input id="compose-target-value" type="text" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text)" placeholder="e.g. ABC123 / 23 / John Doe" />
+          </div>
+
+          <div style="margin-bottom:8px">
+            <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Title</label>
+            <input id="compose-title" type="text" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text)" placeholder="Short title (e.g. 'Misdemeanor arrest')" />
+          </div>
+
+          <div style="margin-bottom:12px">
+            <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Description</label>
+            <textarea id="compose-desc" style="width:100%;padding:6px 8px;border-radius:4px;border:1px solid var(--border);background:rgba(0,0,0,0.3);color:var(--text);min-height:80px" placeholder="Full description..."></textarea>
+          </div>
+
+          <div style="display:flex;gap:10px;justify-content:flex-end">
+            <button id="compose-submit" class="btn">Save Record</button>
+            <button id="compose-cancel" class="tiny-btn">Cancel</button>
+          </div>
+
+          <div id="compose-meta" style="margin-top:10px;color:var(--muted);font-size:12px"></div>
+        </div>
       </div>
     </div>
 
-    <div class="panel-form" style="padding:12px;background:transparent;border:none">
-      <div style="display:flex;gap:10px;margin-bottom:8px">
-        <div style="flex:1">
-          <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Record Type</label>
-          <select id="compose-type" style="width:100%;padding:10px;border-radius:4px">
-            <option value="arrest">Arrest</option>
-            <option value="ticket">Ticket</option>
-            <option value="note">Note</option>
-          </select>
+    <!-- Settings Modal -->
+    <div id="settings-modal">
+      <div class="settings-content">
+        <div class="settings-header">
+          <h2>MDT Settings</h2>
+          <button class="close-btn" id="settings-close">✖</button>
+        </div>
+        
+        <!-- Profile (Unit / Officer) -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
+          <div class="form-group">
+            <label for="profile-unit">Unit</label>
+            <input type="text" id="profile-unit" placeholder="e.g. 2-A-41">
+          </div>
+          <div class="form-group">
+            <label for="profile-officer">Officer #</label>
+            <input type="text" id="profile-officer" placeholder="#1234">
+          </div>
         </div>
 
-        <div style="width:180px">
-          <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Target</label>
-          <select id="compose-target-type" style="width:100%;padding:10px;border-radius:4px">
-            <option value="plate">Plate</option>
-            <option value="netid">NetID</option>
-            <option value="name">Name</option>
-          </select>
+        <div class="color-grid">
+          <div class="color-item">
+            <div class="color-preview" style="background: var(--primary)" id="preview-primary"></div>
+            <label for="color-primary">Primary Color</label>
+            <input type="color" id="color-primary" value="#1a5fb4">
+          </div>
+          <div class="color-item">
+            <div class="color-preview" style="background: var(--accent)" id="preview-accent"></div>
+            <label for="color-accent">Accent Color</label>
+            <input type="color" id="color-accent" value="#26a269">
+          </div>
+          <div class="color-item">
+            <div class="color-preview" style="background: var(--bg)" id="preview-bg"></div>
+            <label for="color-bg">Background</label>
+            <input type="color" id="color-bg" value="#0b1012">
+          </div>
+          <div class="color-item">
+            <div class="color-preview" style="background: var(--panel)" id="preview-panel"></div>
+            <label for="color-panel">Panel Background</label>
+            <input type="color" id="color-panel" value="#161a1d">
+          </div>
+          <div class="color-item">
+            <div class="color-preview" style="background: var(--text)" id="preview-text"></div>
+            <label for="color-text">Text Color</label>
+            <input type="color" id="color-text" value="#ffffff">
+          </div>
+          <div class="color-item">
+            <div class="color-preview" style="background: var(--border)" id="preview-border"></div>
+            <label for="color-border">Border Color</label>
+            <input type="color" id="color-border" value="#2a2e32">
+          </div>
+        </div>
+        
+        <div class="settings-actions">
+          <button class="btn" id="settings-reset">Reset to Default</button>
+          <div style="display:flex;gap:8px">
+            <button class="btn" id="settings-save">Save Changes</button>
+          </div>
         </div>
       </div>
-
-      <div style="margin-bottom:8px">
-        <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Target Value (plate / netId / name)</label>
-        <input id="compose-target-value" type="text" style="width:100%;padding:10px;border-radius:4px" placeholder="e.g. ABC123 / 23 / John Doe" />
-      </div>
-
-      <div style="margin-bottom:8px">
-        <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Title</label>
-        <input id="compose-title" type="text" style="width:100%;padding:10px;border-radius:4px" placeholder="Short title (e.g. 'Misdemeanor arrest')" />
-      </div>
-
-      <div style="margin-bottom:12px">
-        <label style="font-size:12px;color:var(--muted);text-transform:uppercase">Description</label>
-        <textarea id="compose-desc" style="width:100%;padding:10px;border-radius:4px" placeholder="Full description..."></textarea>
-      </div>
-
-      <div style="display:flex;gap:10px;justify-content:flex-end">
-        <button id="compose-submit" class="btn">Save Record</button>
-        <button id="compose-cancel" class="tiny-btn">Cancel</button>
-      </div>
-
-      <div id="compose-meta" style="margin-top:10px;color:var(--muted);font-size:12px"></div>
     </div>
-  </div>
-</div>
 
     <!-- bottom-right resize grip -->
-    <div class="resize-grip" id="resizeGrip" title="Drag to resize" data-tooltip="Drag to resize window" tabindex="0">
-      <div class="bars"><div></div></div>
-    </div>
+    <div class="resize-grip" id="resizeGrip" title="Drag to resize"></div>
   </div>
 
 <script>
@@ -317,11 +859,243 @@
     'use strict';
 
     // -----------------------
+    // Config & Branding
+    // -----------------------
+    const C = (window.NCIC_CONFIG || {});
+    const THEME_DEFAULTS = Object.assign({
+      primary: '#1a5fb4', primaryDark: '#154380',
+      accent: '#26a269', accentDark: '#1e824c',
+      danger: '#c01c28', warning: '#e5a50a',
+      text: '#ffffff', textMuted: '#9f9f9f',
+      bg: '#0b1012', panel: '#161a1d', border: '#2a2e32',
+      success: '#2ec27e'
+    }, (C.theme || {}));
+
+    // Apply document title/branding right away
+    try { if (C.title) document.title = C.title; } catch(e){}
+    function applyBranding(){
+      const badge = document.getElementById('brand-badge');
+      const logoBox = document.getElementById('brand-logo');
+      const logoImg = document.getElementById('brand-logo-img');
+      const titleEl = document.getElementById('brand-title');
+      const subEl = document.getElementById('brand-subtitle');
+
+      if (C.org && C.org.logoUrl) {
+        if (logoBox) logoBox.style.display = 'flex';
+        if (logoImg) logoImg.src = C.org.logoUrl;
+        if (badge) badge.style.display = 'none';
+      } else {
+        if (badge) badge.textContent = (C.org && C.org.shortName) ? C.org.shortName : 'LSPD';
+        if (logoBox) logoBox.style.display = 'none';
+      }
+      if (titleEl) titleEl.textContent = (C.org && C.org.longName) ? C.org.longName : 'NCIC — Mobile Data Terminal';
+      if (subEl)   subEl.textContent   = (C.org && C.org.subtitle) ? C.org.subtitle : 'In-car terminal · Tactical access';
+    }
+    applyBranding();
+
+    // -----------------------
+    // Profile (Unit/Officer) persistence
+    // -----------------------
+    const PROFILE_KEY = 'ncic_mdt_profile_v1';
+    function loadProfile(){
+      try{
+        const s = localStorage.getItem(PROFILE_KEY);
+        if (s) return JSON.parse(s);
+      }catch(e){}
+      return { unit: (C.defaults && C.defaults.unit) || '1-L-12', officer: (C.defaults && C.defaults.officer) || '#3467' };
+    }
+    function saveProfile(p){ try{ localStorage.setItem(PROFILE_KEY, JSON.stringify(p || {})); }catch(e){} }
+    function applyProfile(){
+      const p = loadProfile();
+      const uv = document.getElementById('unit-value');
+      const ov = document.getElementById('officer-value');
+      if (uv) uv.textContent = p.unit || '';
+      if (ov) ov.textContent = p.officer || '';
+      // expose for compose meta if you want
+      window._ncic_unit = p.unit;
+      window._ncic_officer = p.officer;
+    }
+
+    // -----------------------
+    // Color Settings Management (bootstrap from config.js, then allow overrides)
+    // -----------------------
+    const colorSettings = {
+      '--primary': THEME_DEFAULTS.primary,
+      '--primary-dark': THEME_DEFAULTS.primaryDark,
+      '--accent': THEME_DEFAULTS.accent,
+      '--accent-dark': THEME_DEFAULTS.accentDark,
+      '--danger': THEME_DEFAULTS.danger,
+      '--warning': THEME_DEFAULTS.warning,
+      '--text': THEME_DEFAULTS.text,
+      '--text-muted': THEME_DEFAULTS.textMuted,
+      '--bg': THEME_DEFAULTS.bg,
+      '--panel': THEME_DEFAULTS.panel,
+      '--border': THEME_DEFAULTS.border,
+      '--success': THEME_DEFAULTS.success
+    };
+
+    function hardApplyColors(vars){
+      Object.keys(vars).forEach(k => document.documentElement.style.setProperty(k, vars[k]));
+    }
+
+    function loadColorSettings() {
+      // first apply config defaults
+      hardApplyColors(colorSettings);
+      // then load any saved overrides
+      const saved = localStorage.getItem('ncic_mdt_colors');
+      if (saved) {
+        try {
+          const colors = JSON.parse(saved);
+          Object.keys(colors).forEach(key => {
+            if (colorSettings.hasOwnProperty(key)) {
+              colorSettings[key] = colors[key];
+              document.documentElement.style.setProperty(key, colors[key]);
+            }
+          });
+        } catch(e) {
+          console.warn('Failed to load color settings', e);
+        }
+      }
+    }
+
+    function saveColorSettings() {
+      localStorage.setItem('ncic_mdt_colors', JSON.stringify(colorSettings));
+    }
+
+    function updateColorPreview() {
+      const mapping = {
+        '--primary': 'preview-primary',
+        '--accent': 'preview-accent',
+        '--bg': 'preview-bg',
+        '--panel': 'preview-panel',
+        '--text': 'preview-text',
+        '--border': 'preview-border'
+      };
+      Object.keys(mapping).forEach(key => {
+        const preview = document.getElementById(mapping[key]);
+        if (preview) preview.style.backgroundColor = colorSettings[key];
+      });
+    }
+
+    function setupColorSettings() {
+      const settingsModal = document.getElementById('settings-modal');
+      const settingsBtn = document.getElementById('btn-settings');
+      const settingsClose = document.getElementById('settings-close');
+      const settingsSave = document.getElementById('settings-save');
+      const settingsReset = document.getElementById('settings-reset');
+
+      // Profile inputs
+      const profileUnit = document.getElementById('profile-unit');
+      const profileOfficer = document.getElementById('profile-officer');
+
+      // Set initial color inputs
+      const inputs = {
+        '--primary': 'color-primary',
+        '--accent': 'color-accent',
+        '--bg': 'color-bg',
+        '--panel': 'color-panel',
+        '--text': 'color-text',
+        '--border': 'color-border'
+      };
+      Object.keys(inputs).forEach(v => {
+        const input = document.getElementById(inputs[v]);
+        if (input) input.value = colorSettings[v];
+      });
+
+      // Seed profile inputs from saved profile/defaults
+      const p = loadProfile();
+      if (profileUnit) profileUnit.value = p.unit || '';
+      if (profileOfficer) profileOfficer.value = p.officer || '';
+
+      // Open settings
+      if (settingsBtn) settingsBtn.addEventListener('click', () => {
+        // refresh fields when opening
+        const p2 = loadProfile();
+        if (profileUnit) profileUnit.value = p2.unit || '';
+        if (profileOfficer) profileOfficer.value = p2.officer || '';
+        Object.keys(inputs).forEach(v => {
+          const input = document.getElementById(inputs[v]);
+          if (input) input.value = colorSettings[v];
+        });
+        updateColorPreview();
+        settingsModal.classList.add('active');
+      });
+      
+      // Close settings
+      if (settingsClose) settingsClose.addEventListener('click', () => settingsModal.classList.remove('active'));
+      
+      // Save settings (colors + profile)
+      if (settingsSave) settingsSave.addEventListener('click', () => {
+        // Colors
+        Object.keys(inputs).forEach(v => {
+          const input = document.getElementById(inputs[v]);
+          if (input && input.value) {
+            colorSettings[v] = input.value;
+            document.documentElement.style.setProperty(v, input.value);
+          }
+        });
+        saveColorSettings();
+        // Profile
+        const newProfile = {
+          unit: (profileUnit && profileUnit.value) || '',
+          officer: (profileOfficer && profileOfficer.value) || ''
+        };
+        saveProfile(newProfile);
+        applyProfile();
+
+        settingsModal.classList.remove('active');
+      });
+      
+      // Reset settings (revert to config theme)
+      if (settingsReset) settingsReset.addEventListener('click', () => {
+        const defaults = {
+          '--primary': THEME_DEFAULTS.primary,
+          '--accent': THEME_DEFAULTS.accent,
+          '--bg': THEME_DEFAULTS.bg,
+          '--panel': THEME_DEFAULTS.panel,
+          '--text': THEME_DEFAULTS.text,
+          '--border': THEME_DEFAULTS.border
+        };
+        Object.keys(defaults).forEach(key => {
+          colorSettings[key] = defaults[key];
+          document.documentElement.style.setProperty(key, defaults[key]);
+          const input = document.getElementById(inputs[key]);
+          if (input) input.value = defaults[key];
+        });
+        saveColorSettings();
+        updateColorPreview();
+      });
+      
+      // Update previews when colors change
+      Object.keys(inputs).forEach(v => {
+        const input = document.getElementById(inputs[v]);
+        if (input) {
+          input.addEventListener('input', () => {
+            const mapping = {
+              '--primary': 'preview-primary',
+              '--accent': 'preview-accent',
+              '--bg': 'preview-bg',
+              '--panel': 'preview-panel',
+              '--text': 'preview-text',
+              '--border': 'preview-border'
+            };
+            const preview = document.getElementById(mapping[v]);
+            if (preview) preview.style.backgroundColor = input.value;
+          });
+        }
+      });
+    }
+
+    // Load color settings & profile on startup
+    loadColorSettings();
+    applyProfile();
+
+    // -----------------------
     // layout persistence keys
     // -----------------------
     const LAYOUT_KEY = 'ncic_mdt_layout_v2';
     function setCookie(name, value, days=365){ try { const d=new Date(); d.setTime(d.getTime() + (days*24*60*60*1000)); document.cookie = name + "=" + encodeURIComponent(value) + ";expires=" + d.toUTCString() + ";path=/"; } catch(e){} }
-    function getCookie(name){ try { const m = document.cookie.match('(^|;)\s*' + name + '\s*=\s*([^;]+)'); return m ? decodeURIComponent(m.pop()) : null; } catch(e){return null} }
+    function getCookie(name){ try { const m = document.cookie.match('(^|;)\\s*' + name + '\\s*=\\s*([^;]+)'); return m ? decodeURIComponent(m.pop()) : null; } catch(e){return null} }
     function saveLayoutState(state){ try{ localStorage.setItem(LAYOUT_KEY, JSON.stringify(state)); }catch(e){} try{ setCookie(LAYOUT_KEY, JSON.stringify(state), 365);}catch(e){} }
     function loadLayoutState(){ try{ const s = localStorage.getItem(LAYOUT_KEY); if(s) return JSON.parse(s); const c = getCookie(LAYOUT_KEY); if(c) return JSON.parse(c); }catch(e){} return null; }
 
@@ -384,14 +1158,14 @@
     const btnListDispatch   = document.getElementById('btn-list-dispatch');
     const dispatchListEl    = document.getElementById('dispatch-list');
 
-    // Tabs (nav is vertical now, but still uses same selector)
+    // Tabs
     document.querySelectorAll('nav button').forEach(btn => {
       btn.addEventListener('click', () => {
         document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
         document.querySelectorAll('.panel').forEach(p => p.style.display = 'none');
         btn.classList.add('active');
         const panel = document.getElementById('panel-' + btn.dataset.tab);
-        if (panel) panel.style.display = 'flex';
+        if (panel) panel.style.display = 'block';
 
         // auto-call list when jumping to a section
         const which = btn.dataset.tab;
@@ -528,7 +1302,7 @@
         const rec = document.createElement('div'); rec.className='record';
         // Added REPORTER field (shows creator_identifier and optional creator_discord)
         const reporterLabelHtml = `<div class="record-label">REPORTER</div>`;
-        const discordPart = r.creator_discord ? ` <span style="font-weight:400;color:var(--muted);font-size:12px">(${escapeHtml(r.creator_discord)})</span>` : '';
+        const discordPart = r.creator_discord ? ` <span style="font-weight:400;color:var(--text-muted);font-size:12px">(${escapeHtml(r.creator_discord)})</span>` : '';
         const reporterValueHtml = `<div class="record-value">${escapeHtml(r.creator_identifier || '')}${discordPart}</div>`;
 
         rec.innerHTML = `
@@ -547,7 +1321,7 @@
             </div>
           </div>
 
-          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(r.description || '')}</div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--text-muted)">${escapeHtml(r.description || '')}</div>
 
           <div style="grid-column:1 / -1;margin-top:8px;display:flex;justify-content:flex-start;gap:12px;align-items:center">
             <div style="display:flex;flex-direction:column">
@@ -576,7 +1350,7 @@
             <div class="record-label">SUBJECT</div>
             <div class="record-value">${escapeHtml(r.subject_name || '')} ${r.subject_netId ? '('+escapeHtml(r.subject_netId)+')':''}</div>
           </div>
-          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(r.charges || '')}</div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--text-muted)">${escapeHtml(r.charges || '')}</div>
           <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;margin-top:6px">
             <button class="tiny-btn" data-action="remove-warrant" data-id="${escapeHtml(r.id || '')}">${r.active == 1 || r.active === '1' ? 'Revoke' : 'Reactivate'}</button>
           </div>
@@ -591,9 +1365,10 @@
         const nr = document.createElement('div'); nr.className='no-results'; nr.textContent='No active calls.'; dispatchListEl.appendChild(nr); return;
       }
       records.forEach(r => {
-        const rec = document.createElement('div'); rec.className='record';
+        const item = document.createElement('div');
+        item.className = 'record';
         const status = escapeHtml(r.status || '');
-        rec.innerHTML = `
+        item.innerHTML = `
           <div class="record-field">
             <div class="record-label">DATE/TIME</div>
             <div class="record-value">${escapeHtml(r.timestamp || '')}</div>
@@ -602,7 +1377,7 @@
             <div class="record-label">CALLER / LOC</div>
             <div class="record-value">${escapeHtml(r.caller_name || '')} — ${escapeHtml(r.location || '')}</div>
           </div>
-          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(r.message || '')}</div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--text-muted)">${escapeHtml(r.message || '')}</div>
           <div style="grid-column:1 / -1;display:flex;justify-content:space-between;align-items:center;margin-top:6px">
             <div class="small">Status: <strong>${status}</strong></div>
             <div>
@@ -610,11 +1385,11 @@
             </div>
           </div>
         `;
-        dispatchListEl.appendChild(rec);
+        dispatchListEl.appendChild(item);
       });
     }
 
-    // MDT records render helpers (added to show mdt_id_records results) with collapsible details
+    // MDT records render helpers with collapsible details
     function renderMDTRecordsForPlate(records) {
       if (!plateStatus) return;
       // remove previous MDT records container if present
@@ -795,6 +1570,15 @@
         if (d.lastPedName && d.lastPedName !== '') idInput.value = d.lastPedName;
         else if (d.netId != null && d.netId !== '') idInput.value = d.netId;
         else idInput.value = '';
+
+        // Optional: allow server to prefill profile
+        if (d.unit || d.officer) {
+          const p = loadProfile();
+          if (d.unit) p.unit = d.unit;
+          if (d.officer) p.officer = d.officer;
+          saveProfile(p);
+          applyProfile();
+        }
 
         if (Array.isArray(d.plateHistory) && plateHistorySel) {
           plateHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
@@ -987,7 +1771,7 @@
             <div class="record-label">TIME</div>
             <div class="record-value">${escapeHtml(c.timestamp || '')}</div>
           </div>
-          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--muted)">${escapeHtml(c.message || '')}</div>
+          <div style="grid-column:1 / -1;padding-top:8px;font-size:13px;color:var(--text-muted)">${escapeHtml(c.message || '')}</div>
           <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;margin-top:6px">
             <button class="tiny-btn" data-action="ack-dispatch" data-id="${escapeHtml(c.id || '')}">Acknowledge</button>
           </div>
@@ -1103,8 +1887,9 @@
       function onDown(e){
         if (e.button !== undefined && e.button !== 0) return;
         resizing=true;
-        sx = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX);
-        sy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
+sx = e.clientX || (e.touches && e.touches[0] && e.touches[0].clientX);
+sy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
+
         startW = app.offsetWidth;
         startH = app.offsetHeight;
         document.addEventListener('pointermove', onMove);
@@ -1139,56 +1924,16 @@
         });
       }
       grip.addEventListener('pointerdown', onDown);
-
-      // keyboard accessibility for grip (arrows change size)
-      grip.addEventListener('keydown', (e) => {
-        const step = e.shiftKey ? 10 : 30;
-        if (!app) return;
-        switch(e.key){
-          case 'ArrowRight': app.style.width = (app.offsetWidth + step) + 'px'; break;
-          case 'ArrowLeft': app.style.width = Math.max(MIN_W, app.offsetWidth - step) + 'px'; break;
-          case 'ArrowDown': app.style.height = (app.offsetHeight + step) + 'px'; break;
-          case 'ArrowUp': app.style.height = Math.max(MIN_H, app.offsetHeight - step) + 'px'; break;
-          case 'Enter':
-            saveLayoutState({ left: px(app.style.left || window.getComputedStyle(app).left) || undefined, top: px(app.style.top || window.getComputedStyle(app).top) || undefined, width: Math.round(px(app.style.width || window.getComputedStyle(app).width)), height: Math.round(px(app.style.height || window.getComputedStyle(app).height)) });
-            break;
-        }
-      });
     })();
 
-    // keep MDT on-screen after viewport resize
-    window.addEventListener('resize', () => {
-      if (!app) return;
-      const left = px(app.style.left || window.getComputedStyle(app).left);
-      const top  = px(app.style.top  || window.getComputedStyle(app).top);
-      const w    = app.offsetWidth;
-      const h    = app.offsetHeight;
-      let changed=false;
-      let newLeft = left, newTop = top;
-      if (left + w > window.innerWidth - 8) { newLeft = Math.max(8, window.innerWidth - w - 8); changed=true; }
-      if (top + h > window.innerHeight - 8) { newTop = Math.max(8, window.innerHeight - h - 8); changed=true; }
-      if (changed) { app.style.left = newLeft + 'px'; app.style.top = newTop + 'px'; saveLayoutState({ left: Math.round(newLeft), top: Math.round(newTop), width: Math.round(w), height: Math.round(h) }); }
+    // Setup color & profile settings after DOM is ready
+    document.addEventListener('DOMContentLoaded', function() {
+      setupColorSettings();
+      updateColorPreview();
     });
-
-    // Try to apply saved layout immediately on open if message triggers open
-    let applied = false;
-    function tryApplySavedLayout(){
-      if (applied) return;
-      applied = true;
-      const s = loadLayoutState();
-      if (s && app) {
-        if (s.left !== undefined && s.top !== undefined) { app.style.left = s.left + 'px'; app.style.top = s.top + 'px'; app.style.transform = 'none'; }
-        if (s.width) app.style.width = s.width + 'px';
-        if (s.height) app.style.height = s.height + 'px';
-      }
-    }
 
     // expose for debugging
     window._ncic_sendUI = sendUI;
-
-    // defensive: ensure grip is last child so it sits visually above content
-    if (grip && app && grip.parentNode !== app) app.appendChild(grip);
-    if (grip) grip.style.left = 'auto'; // force left auto so right placement is used
   })();
 </script>
 
@@ -1292,122 +2037,5 @@
   });
 })();
 </script>
-
-
-<!-- MDT recordsResult & id/plate result renderer - inserted by ChatGPT -->
-<script>
-(function(){
-  function escapeHtml(s){ if (s===null||s===undefined) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;'); }
-
-  function renderRecordsToContainer(records, container, headerHtml){
-    if (!container) return;
-    container.innerHTML = '';
-    if (headerHtml) {
-      const h = document.createElement('div');
-      h.className = 'results-subheader';
-      h.innerHTML = headerHtml;
-      container.appendChild(h);
-    }
-    if (!records || records.length === 0) {
-      const no = document.createElement('div');
-      no.className = 'no-results';
-      no.textContent = 'No MDT records for this subject.';
-      container.appendChild(no);
-      return;
-    }
-
-    records.forEach(r => {
-      const rec = r || {};
-      const box = document.createElement('div');
-      box.className = 'record-item';
-      box.style.padding = '8px';
-      box.style.margin = '8px 0';
-      box.style.borderTop = '1px solid rgba(255,255,255,0.03)';
-      box.style.background = 'transparent';
-
-      const dt = rec.timestamp || rec.time || rec.date || '';
-      const type = rec.rtype || rec.type || rec.record_type || rec.target_type || '--';
-      const title = rec.title || rec.first_name || rec.name || '';
-      const desc = rec.description || rec.desc || rec.details || '';
-      const creator = rec.creator_identifier || rec.creator || rec.creator_discord || rec.identifier || '';
-
-      let inner = '<div style="display:flex;justify-content:space-between;align-items:flex-start">';
-      inner += '<div style="font-size:12px;color:#9adbb6">'+escapeHtml(dt)+'</div>';
-      inner += '<div style="font-size:12px;color:#8ef6b1">TYPE<br/><strong>'+escapeHtml(type)+'</strong></div>';
-      inner += '<div style="font-size:12px;color:#9adbb6">Creator:<br/>'+escapeHtml(creator)+'</div>';
-      inner += '</div>';
-
-      if (title && title !== '') inner += '<div style="font-weight:700;margin-top:6px;color:#9adbb6">'+escapeHtml(title)+'</div>';
-      if (desc && desc !== '') inner += '<div style="margin-top:6px;color:#9adbb6">'+escapeHtml(desc)+'</div>';
-
-      // show other keys
-      const skip = new Set(['id','target_type','target_value','rtype','type','title','description','desc','creator_identifier','creator','creator_discord','creatorDiscord','timestamp','time','date','first_name','last_name','identifier','netId']);
-      const otherKeys = Object.keys(rec).filter(k => !skip.has(k) && rec[k] !== null && rec[k] !== undefined && String(rec[k]).trim() !== '');
-      if (otherKeys.length > 0) {
-        inner += '<div style="margin-top:8px;font-size:12px;color:#9adbb6">Additional Info:</div><ul style="margin:6px 0 0 16px;color:#9adbb6">';
-        otherKeys.forEach(k => {
-          inner += '<li><strong>'+escapeHtml(k)+':</strong> '+escapeHtml(String(rec[k]))+'</li>';
-        });
-        inner += '</ul>';
-      }
-
-      box.innerHTML = inner;
-      container.appendChild(box);
-    });
-  }
-
-  window.addEventListener('message', function(event){
-    const d = event.data;
-    if (!d || !d.action) return;
-
-    // Normalize records from various payloads
-    let records = [];
-    let target_type = null;
-    let headerHtml = '';
-
-    if (d.action === 'recordsResult') {
-      records = d.records || d.result || d.data || d || [];
-      target_type = d.target_type || d.targetType || null;
-    } else if (d.action === 'idResult') {
-      // d may contain: { action:'idResult', netId, name, licenseStatus, records: [...] }
-      records = d.records || [];
-      target_type = 'name';
-      headerHtml = '<div class="id-header"><strong>Name:</strong> '+escapeHtml(d.name||'')+' &nbsp; <strong>License:</strong> '+escapeHtml(d.licenseStatus||'')+'</div>';
-    } else if (d.action === 'plateResult') {
-      // d may contain: { action:'plateResult', plate, status, records: [...] }
-      records = d.records || d.records || d.data || [];
-      target_type = 'plate';
-      headerHtml = '<div class="plate-header"><strong>Plate:</strong> '+escapeHtml(d.plate||'')+' &nbsp; <strong>Status:</strong> '+escapeHtml(d.status||'')+'</div>';
-    } else {
-      // ignore other actions
-      return;
-    }
-
-    // If records is an object with nested array, try common keys
-    if (!Array.isArray(records) && typeof records === 'object') {
-      const tryKeys = ['records','data','rows','result','mdt_id_records','mdt_id_record'];
-      for (const k of tryKeys){
-        if (Array.isArray(records[k])) { records = records[k]; break; }
-      }
-    }
-
-    if (!Array.isArray(records) && Array.isArray(d)) records = d;
-
-    // Decide container: plate -> #plate-status, otherwise #id-results
-    let container = null;
-    if (target_type === 'plate' || (d.action === 'plateResult')) {
-      container = document.querySelector('#plate-status') || document.querySelector('#panel-plate .scroll') || document.querySelector('.panel#panel-plate .scroll');
-    } else {
-      container = document.querySelector('#id-results') || document.querySelector('#panel-id .scroll') || document.querySelector('.panel#panel-id .scroll');
-    }
-
-    // As a fallback try generic results container
-    if (!container) container = document.querySelector('.results') || document.querySelector('.results .scroll');
-
-    renderRecordsToContainer(records, container, headerHtml);
-  });
-})();
-</script>
-<!-- end inserted renderer -->
 </body>
 </html>
