@@ -1,3 +1,29 @@
+
+local function az5pdNormalizeJobName(name)
+  if name == nil then return nil end
+  return string.lower(tostring(name))
+end
+
+local function az5pdGetAllowedJobs()
+  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
+  if type(cfg) == 'table' and next(cfg) ~= nil then
+    return cfg
+  end
+  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+end
+
+local function az5pdJobAllowed(jobName)
+  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
+  local normalized = az5pdNormalizeJobName(jobName)
+  if not normalized then return false end
+  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
+    if az5pdNormalizeJobName(allowed) == normalized then
+      return true
+    end
+  end
+  return false
+end
+
 local function isJobAllowed(job)
     if not job then return false end
     for _, allowed in ipairs(Config.AllowedJobs) do
@@ -46,6 +72,11 @@ Citizen.CreateThread(function()
             local function safeNetworkGetEntityFromNetworkId(netId)
               netId = tonumber(netId)
               if not netId or netId == 0 then return nil end
+              local exists = false
+              local okExists = pcall(function()
+                exists = NetworkDoesNetworkIdExist(netId)
+              end)
+              if not okExists or not exists then return nil end
               local ok, ent = pcall(NetworkGetEntityFromNetworkId, netId)
               if ok and ent and ent ~= 0 and DoesEntityExist(ent) then return ent end
               return nil
@@ -113,9 +144,26 @@ Citizen.CreateThread(function()
               return nil
             end
 
-local stopEnabled, debugEnabled = true, true
+local stopEnabled, debugEnabled = true, (Config and Config.Debug == true) or false
             local pedData, lastPedNetId = {}, nil
+            local ensurePerson -- forward declaration (used before definition)
+            local openExternalMDT -- forward declaration (used before definition)
             local lastPedEntity = nil
+
+            local function cacheTargetPedContext(data)
+              local pedEntity = nil
+              if data and data.entity then pedEntity = data.entity
+              elseif data and data.ped then pedEntity = data.ped
+              elseif data and data.target then pedEntity = data.target end
+              if not pedEntity or pedEntity == 0 or not DoesEntityExist(pedEntity) or not IsEntityAPed(pedEntity) or IsPedAPlayer(pedEntity) then
+                return nil, nil
+              end
+              local pedKey = safePedToNet(pedEntity) or tostring(pedEntity)
+              ensurePerson(pedKey)
+              lastPedNetId = tostring(pedKey)
+              lastPedEntity = pedEntity
+              return pedEntity, tostring(pedKey)
+            end
 
             local function stopPedFromTarget(data)
               local pedEntity = nil
@@ -139,21 +187,15 @@ local stopEnabled, debugEnabled = true, true
               netId = tostring(netId)
 
               pedData = pedData or {}
-              if not pedData[netId] then
-                if generatePerson then
-                  local ok2, p = pcall(generatePerson)
-                  if ok2 and p then pedData[netId] = p else pedData[netId] = {} end
-                else
-                  pedData[netId] = {}
-                end
-              end
+              -- Ensure we always have identity data (even if another helper created an empty bucket)
+              ensurePerson(netId)
 
               lastPedNetId = netId
               lastPedEntity = pedEntity
 
               if setPedProtected then pcall(function() setPedProtected(netId, true) end) end
               pedData[netId].pulledInVehicle = false
-              pedData[netId].forcedStop = false
+              pedData[netId].forcedStop = true
 
               NetworkRequestControlOfEntity(pedEntity)
               SetEntityAsMissionEntity(pedEntity, true, true)
@@ -166,6 +208,8 @@ local stopEnabled, debugEnabled = true, true
 
               pcall(function() TriggerEvent('__clientRequestPopulate') end)
             end
+
+            local resolveCuffedPed
 
             if exports and exports.ox_target and exports.ox_target.addGlobalPed then
               pcall(function()
@@ -181,8 +225,46 @@ local stopEnabled, debugEnabled = true, true
               end)
             end
 
+            if exports and exports.ox_target and exports.ox_target.addGlobalVehicle then
+              pcall(function()
+                exports.ox_target:addGlobalVehicle({
+                  {
+                    name = "az_police_seat_cuffed_left",
+                    label = "Seat Cuffed Ped (Left Rear)",
+                    icon = "car-side",
+                    distance = 3.0,
+                    canInteract = function(entity, distance)
+                      local ped = resolveCuffedPed and select(1, resolveCuffedPed()) or nil
+                      return ped and DoesEntityExist(ped) and distance <= 3.0 and IsVehicleSeatFree(entity, 1)
+                    end,
+                    onSelect = function(data)
+                      seatPed(1, data and data.entity or nil)
+                    end
+                  },
+                  {
+                    name = "az_police_seat_cuffed_right",
+                    label = "Seat Cuffed Ped (Right Rear)",
+                    icon = "car-side",
+                    distance = 3.0,
+                    canInteract = function(entity, distance)
+                      local ped = resolveCuffedPed and select(1, resolveCuffedPed()) or nil
+                      return ped and DoesEntityExist(ped) and distance <= 3.0 and IsVehicleSeatFree(entity, 2)
+                    end,
+                    onSelect = function(data)
+                      seatPed(2, data and data.entity or nil)
+                    end
+                  }
+                })
+              end)
+            end
+
             local isDragging, draggedPed = false, nil
+            local lastCuffedPedNetId, lastCuffedPedEntity = nil, nil
             local pullVeh = nil
+            local pendingPullVeh = nil
+            local pendingPullDeadline = 0
+            local pendingPullMonitor = false
+            local pullVehBlip = nil
 
             local function dprint(...)
               if debugEnabled then
@@ -209,7 +291,151 @@ local stopEnabled, debugEnabled = true, true
               "Failure to Signal","Distracted Driving","Broken Taillight"
             }
 
-            local function generatePerson()
+            -- upvalues for generated ID data (must be declared before generatePerson)
+            local ln, st
+            local getImmersionConfig
+            local immersionEnabled
+            local playerPresenceFeelsThreatening
+            local loadAnimSetTimed
+            local computeSuspicionChance
+            local applyImmersionProfileToPed
+            local enrichPedImmersionProfile
+
+            getImmersionConfig = function()
+              return (Config and Config.Immersion) or {}
+            end
+
+            immersionEnabled = function()
+              local cfg = getImmersionConfig()
+              return cfg.enabled ~= false
+            end
+
+            playerPresenceFeelsThreatening = function()
+              local player = PlayerPedId()
+              if not player or player == 0 then return false end
+              if IsPlayerFreeAiming(PlayerId()) then return true end
+              if IsPedArmed(player, 7) then return true end
+              local veh = GetVehiclePedIsIn(player, false)
+              if veh and veh ~= 0 then
+                local sirenOn = false
+                local ok, value = pcall(IsVehicleSirenOn, veh)
+                if ok and value then sirenOn = true end
+                if sirenOn then return true end
+              end
+              return false
+            end
+
+            loadAnimSetTimed = function(animSet, timeout)
+              if not animSet or animSet == '' then return false end
+              if HasAnimSetLoaded(animSet) then return true end
+              RequestAnimSet(animSet)
+              local untilAt = GetGameTimer() + (timeout or 1200)
+              while not HasAnimSetLoaded(animSet) and GetGameTimer() < untilAt do
+                Citizen.Wait(10)
+              end
+              return HasAnimSetLoaded(animSet)
+            end
+
+            computeSuspicionChance = function(ped)
+              local cfg = getImmersionConfig()
+              local suspicion = cfg.suspicion or {}
+              local chance = tonumber(suspicion.baseChance) or 0.18
+              local onFoot = not (ped and DoesEntityExist(ped) and IsPedInAnyVehicle(ped, false))
+              if onFoot then
+                chance = chance * (tonumber(suspicion.onFootMultiplier) or 1.75)
+              else
+                chance = chance * (tonumber(suspicion.vehicleMultiplier) or 0.75)
+              end
+              local hour = GetClockHours()
+              if hour >= 21 or hour <= 5 then
+                chance = chance * (tonumber(suspicion.nightMultiplier) or 1.15)
+              end
+              if playerPresenceFeelsThreatening() then
+                chance = chance * (tonumber(suspicion.weaponDrawnMultiplier) or 1.30)
+              end
+              return math.max(0.0, math.min(tonumber(suspicion.maxChance) or 0.92, chance))
+            end
+
+            applyImmersionProfileToPed = function(ped, info)
+              if not ped or ped == 0 or not DoesEntityExist(ped) or type(info) ~= 'table' then return end
+              local cfg = getImmersionConfig()
+              local behavior = cfg.behavior or {}
+              if info.isDrunk then
+                pcall(SetPedIsDrunk, ped, true)
+                if behavior.enableDrunkClipset ~= false then
+                  local clip = tostring(behavior.drunkClipset or 'move_m@drunk@verydrunk')
+                  if loadAnimSetTimed(clip, 1200) then
+                    pcall(SetPedMovementClipset, ped, clip, 0.35)
+                  end
+                end
+              end
+              if info.suspicious then
+                pcall(SetPedAlertness, ped, info.wanted and 3 or 2)
+              elseif info.isHigh then
+                pcall(SetPedAlertness, ped, 1)
+              end
+            end
+
+            enrichPedImmersionProfile = function(ped, info)
+              info = type(info) == 'table' and info or {}
+              if info._immersionProfiled then
+                applyImmersionProfileToPed(ped, info)
+                return info
+              end
+              local cfg = getImmersionConfig()
+              local traits = cfg.traits or {}
+              local suspicious = math.random() < computeSuspicionChance(ped)
+              local onFoot = not (ped and DoesEntityExist(ped) and IsPedInAnyVehicle(ped, false))
+
+              info.behaviorProfile = onFoot and 'on_foot' or 'vehicle'
+              info.suspicious = suspicious
+              info.hasIllegalItems = info.hasIllegalItems == true or (suspicious and math.random() < (tonumber(traits.illegalItemsChance) or 0.48)) or false
+              info.wanted = info.wanted == true or (suspicious and math.random() < (tonumber(traits.warrantChance) or 0.22)) or false
+              info.suspended = info.suspended == true or (suspicious and math.random() < (tonumber(traits.suspendedChance) or 0.14)) or false
+              info.isDrunk = info.isDrunk == true or (suspicious and math.random() < (tonumber(traits.drunkChance) or 0.20)) or false
+              info.isHigh = info.isHigh == true or (suspicious and math.random() < (tonumber(traits.highChance) or 0.24)) or false
+              info.nervous = suspicious and (math.random() < (tonumber(traits.nervousChance) or 0.40)) or false
+
+              local disposition = 'calm'
+              if suspicious then
+                local roll = math.random()
+                local driveChance = tonumber(traits.driveAwayChance) or 0.65
+                local runChance = tonumber(traits.runChance) or 0.44
+                local hideChance = tonumber(traits.hideChance) or 0.28
+                if not onFoot then
+                  if roll < driveChance then
+                    disposition = 'drive_away'
+                  else
+                    disposition = 'nervous'
+                  end
+                elseif roll < runChance then
+                  disposition = 'run'
+                elseif roll < (runChance + hideChance) then
+                  disposition = 'hide'
+                else
+                  disposition = 'nervous'
+                end
+              end
+              info.disposition = info.disposition or disposition
+
+              if info.suspended then
+                info.licenseStatus = info.licenseStatus or 'SUSPENDED'
+              elseif info.wanted and not info.licenseStatus then
+                info.licenseStatus = 'VALID'
+              end
+
+              local refusal = tonumber(info.idRefusalChance) or 0.18
+              if info.wanted then refusal = math.max(refusal, 0.55) end
+              if info.suspended then refusal = math.max(refusal, 0.35) end
+              if info.hasIllegalItems then refusal = math.max(refusal, 0.32) end
+              if info.isDrunk or info.isHigh then refusal = math.max(refusal, 0.28) end
+              info.idRefusalChance = refusal
+              info._immersionProfiled = true
+              applyImmersionProfileToPed(ped, info)
+              return info
+            end
+
+            local function generatePerson(ped)
 
             local fn = {
               "John", "James", "Robert", "Michael", "William", "David", "Richard", "Joseph",
@@ -339,7 +565,7 @@ local stopEnabled, debugEnabled = true, true
               "Yarahia", "Noinein", "Laielek", "Lamiam", "Nilaia", "Yarax", "Niskien", "Kolieus",
             }
 
-            local ln = {
+            ln = {
               "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis",
               "Rodriguez", "Martinez", "Hernandez", "Lopez", "Gonzalez", "Wilson", "Anderson", "Thomas",
               "Taylor", "Moore", "Jackson", "Martin", "Lee", "Perez", "Thompson", "White",
@@ -467,7 +693,7 @@ local stopEnabled, debugEnabled = true, true
               "KiVale", "ViCroft", "Blueton", "Riverwood", "MaVich", "BoCastle", "Northbury", "TaMore",
             }
 
-            local st = {
+            st = {
               "Grove St","Vinewood Blvd","Vinewood Park Dr","Del Perro Blvd","Del Perro Fwy","Los Santos Freeway",
               "Vespucci Blvd","Vespucci Canals Dr","Mirror Park Blvd","Alta St","Popular St","South Mo Milton Dr",
               "Richman Ave","Rockford Dr","Rockford Hills Dr","Integrity Way","Innocence Blvd","El Rancho Blvd",
@@ -542,10 +768,49 @@ local stopEnabled, debugEnabled = true, true
                             st[math.random(#st)])
               local sig = ""
               for i=1,5 do sig = sig .. string.char(math.random(65,90)) end
-              local wanted = math.random() < 0.2
-              return { name = name, dob = dob, address = addr,
-                      signature = sig, wanted = wanted }
+              local profile = enrichPedImmersionProfile(ped, {
+                      name = name, dob = dob, address = addr,
+                      signature = sig, idRequests = 0, lastIdOutcome = nil,
+                      wanted = false, suspended = false
+              })
+              return profile
             end
+
+
+            ensurePerson = function(netId)
+              pedData = pedData or {}
+              local key = tostring(netId or "")
+              if key == "" then return {} end
+
+              local d = pedData[key]
+              if type(d) ~= "table" then d = nil end
+
+              -- If entry exists but is empty (common when other helpers create the bucket),
+              -- generate a person so ID checks never show nil fields.
+              if not d or d.name == nil or d.dob == nil or d.address == nil or d.signature == nil then
+                if generatePerson then
+                  local ped = safeNetToPed(netId)
+                  local ok, p = pcall(generatePerson, ped)
+                  if ok and type(p) == "table" then
+                    pedData[key] = p
+                    d = p
+                  else
+                    pedData[key] = pedData[key] or {}
+                    d = pedData[key]
+                  end
+                else
+                  pedData[key] = pedData[key] or {}
+                  d = pedData[key]
+                end
+              end
+              local ped = safeNetToPed(netId)
+              if ped and DoesEntityExist(ped) and enrichPedImmersionProfile then
+                d = enrichPedImmersionProfile(ped, d or {})
+                pedData[key] = d
+              end
+              return d
+            end
+
 
             local function notify(id, title, desc, typ, icon, iconColor)
               if lib and lib.notify then
@@ -562,6 +827,8 @@ local stopEnabled, debugEnabled = true, true
                   style        = {
                     backgroundColor = '#1e1e2e',
                     color           = '#e0def4',
+                    boxShadow       = 'none',
+                    border          = '1px solid rgba(255,255,255,0.08)',
                     ['.description']= { color = '#a6adc8' }
                   },
                   sound = {
@@ -585,9 +852,577 @@ local stopEnabled, debugEnabled = true, true
               end
             end
 
+            local activeSpeech3D = nil
+            local activeFollowPedNet = nil
+
+            local function drawWorldTextAt(coords, text3d)
+              if not coords or not text3d or text3d == '' then return end
+              local onScreen, sx, sy = GetScreenCoordFromWorldCoord(coords.x, coords.y, coords.z)
+              if not onScreen then return end
+              SetTextScale(0.34, 0.34)
+              SetTextFont(4)
+              SetTextProportional(1)
+              SetTextCentre(true)
+              SetTextColour(255,255,255,235)
+              SetTextOutline()
+              BeginTextCommandDisplayText('STRING')
+              AddTextComponentSubstringPlayerName(text3d)
+              EndTextCommandDisplayText(sx, sy)
+            end
+
+            local function showSpeechBubble3D(ped, label, duration)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              activeSpeech3D = {
+                ped = ped,
+                text = tostring(label or ''),
+                untilAt = GetGameTimer() + (duration or 5500)
+              }
+            end
+
+            Citizen.CreateThread(function()
+              while true do
+                if activeSpeech3D and activeSpeech3D.untilAt and GetGameTimer() < activeSpeech3D.untilAt and activeSpeech3D.ped and DoesEntityExist(activeSpeech3D.ped) then
+                  local c = GetEntityCoords(activeSpeech3D.ped)
+                  drawWorldTextAt(vector3(c.x, c.y, c.z + 1.1), activeSpeech3D.text)
+                  Citizen.Wait(0)
+                else
+                  activeSpeech3D = nil
+                  Citizen.Wait(150)
+                end
+              end
+            end)
+
+            local function getCurrentInteractionPed()
+              if lastPedNetId then
+                local ped = safeNetToPed(tonumber(lastPedNetId) or lastPedNetId)
+                if ped and ped ~= 0 and DoesEntityExist(ped) then return ped, tostring(lastPedNetId) end
+              end
+              if pullVeh and pullVeh ~= 0 and DoesEntityExist(pullVeh) then
+                local driver = GetPedInVehicleSeat(pullVeh, -1)
+                if driver and driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
+                  local n = tostring(safePedToNet(driver) or '')
+                  if n ~= '' then lastPedNetId = n end
+                  return driver, n
+                end
+              end
+              return nil, nil
+            end
+
+            local function getQuestionResponse(info, category)
+              info = type(info) == 'table' and info or {}
+              local cat = tostring(category or 'general')
+              local line = ''
+              local title = 'Question Response'
+              if cat == 'documentation' then
+                title = 'Documentation Response'
+                if info.suspended then
+                  line = "My license should still be okay... the paperwork might just be out of date."
+                elseif info.wanted then
+                  line = "It's here somewhere. Give me a second, I'm trying to find it."
+                elseif info.nervous then
+                  line = "Yes, officer. I have it. Sorry, just a little nervous right now."
+                else
+                  line = "Sure. My license, registration, and insurance are right here."
+                end
+              elseif cat == 'travel' then
+                title = 'Travel Plans'
+                if info.isDrunk or info.isHigh then
+                  line = "I'm just heading up the road. I think I missed my turn a little bit ago."
+                elseif info.wanted then
+                  line = "Just trying to get home and be on my way."
+                elseif info.hasIllegalItems then
+                  line = "Coming from a friend's place. Nothing major, just heading through."
+                else
+                  line = "Heading home from work and cutting through here to save time."
+                end
+              elseif cat == 'dui' then
+                title = 'DUI Response'
+                if info.isDrunk then
+                  line = "I'm fine to drive. I only had a couple earlier."
+                elseif info.isHigh then
+                  line = "No, officer. I'm just tired, that's all."
+                elseif info.nervous then
+                  line = "No drinking. I'm just anxious right now."
+                else
+                  line = "No alcohol, no drugs. I'm completely sober."
+                end
+              elseif cat == 'personal' then
+                title = 'Personal Questions'
+                if info.wanted then
+                  line = "I'd rather keep this as short as possible if that's alright."
+                elseif info.nervous then
+                  line = "I live nearby. Sorry if I seem off, traffic stops make me nervous."
+                elseif info.hasIllegalItems then
+                  line = "Nothing much going on. Just trying to finish my day and get home."
+                else
+                  line = "Name's " .. tostring(info.name or 'Unknown') .. ". I live in the county and work around here."
+                end
+              end
+              return title, line
+            end
+
+            local rememberDetainedVehicleState
+
+            local rememberDetainedVehicleState
+
+            local function showPedQuestionHeadText(ped, text, durationMs)
+              durationMs = durationMs or 5000
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+            
+              CreateThread(function()
+                local endAt = GetGameTimer() + durationMs
+                while GetGameTimer() < endAt do
+                  Wait(0)
+                  if not DoesEntityExist(ped) then break end
+            
+                  local pedCoords = GetEntityCoords(ped)
+                  local playerCoords = GetGameplayCamCoord()
+                  local dist = #(playerCoords - pedCoords)
+            
+                  if dist <= 20.0 then
+                    DrawText3D(pedCoords.x, pedCoords.y, pedCoords.z + 1.05, text)
+                  end
+                end
+              end)
+            end
+            
+            local function askPedQuestion(category)
+              local ped, netId = getCurrentInteractionPed()
+              if not ped or not DoesEntityExist(ped) then
+                return notify('question_none', 'No Subject', 'No nearby NPC is available for questioning.', 'warning', 'comments', '#DD6B20')
+              end
+            
+              local pedKey = tostring(netId or safePedToNet(ped) or ped)
+              local info = ensurePerson(pedKey)
+              local inVehicle = IsPedInAnyVehicle(ped, false)
+              local veh = inVehicle and GetVehiclePedIsIn(ped, false) or 0
+            
+              if inVehicle then
+                pedData = pedData or {}
+                pedData[pedKey] = pedData[pedKey] or {}
+                pedData[pedKey].pulledInVehicle = true
+                pedData[pedKey].pulledProtected = true
+                pedData[pedKey].questioningInVehicle = true
+                pedData[pedKey].allowVehicleExitUntil = nil
+                pedData[pedKey].preventVehicleReseatUntil = nil
+            
+                if rememberDetainedVehicleState then
+                  rememberDetainedVehicleState(ped, pedKey, veh)
+                end
+            
+                NetworkRequestControlOfEntity(ped)
+            
+                if veh and veh ~= 0 and DoesEntityExist(veh) then
+                  NetworkRequestControlOfEntity(veh)
+                  SetVehicleEngineOn(veh, true, true, true)
+                  SetVehicleHandbrake(veh, true)
+                  SetVehicleDoorsLocked(veh, 4)
+            
+                  -- keep them seated
+                  TaskVehicleTempAction(ped, veh, 27, 1500)
+                  SetPedIntoVehicle(ped, veh, -1)
+                end
+            
+                SetBlockingOfNonTemporaryEvents(ped, true)
+                SetPedKeepTask(ped, true)
+                holdPedAttention(ped, true)
+                monitorKeepInVehicle(pedKey, veh, 20000)
+              else
+                TaskTurnPedToFaceEntity(ped, PlayerPedId(), 1800)
+                TaskLookAtEntity(ped, PlayerPedId(), 2500, 2048, 3)
+              end
+            
+              local title, line = getQuestionResponse(info, category)
+            
+              -- keep ox_lib / notify
+              notify('question_' .. tostring(category), title, line, 'inform', 'comments', '#4299E1')
+            
+              -- add back the floating text above their head
+              showPedQuestionHeadText(ped, line, 5000)
+            
+              if inVehicle and pedData and pedData[pedKey] then
+                pedData[pedKey].questioningInVehicle = nil
+                monitorKeepInVehicle(pedKey, veh, 12000)
+              end
+            end
+
+            local function setPedFollowState(enable)
+              local ped, netId = getCurrentInteractionPed()
+              if not ped or not DoesEntityExist(ped) then
+                return notify('follow_none', 'No Subject', 'No nearby NPC available.', 'warning', 'person-walking', '#DD6B20')
+              end
+              if enable then
+                if IsPedInAnyVehicle(ped, false) then
+                  return notify('follow_vehicle', 'Still In Vehicle', 'Tell them to exit first if you want them to follow on foot.', 'warning', 'person-walking', '#DD6B20')
+                end
+                ClearPedTasks(ped)
+                SetBlockingOfNonTemporaryEvents(ped, true)
+                TaskFollowToOffsetOfEntity(ped, PlayerPedId(), 0.0, -1.2, 0.0, 2.0, -1, 1.5, true)
+                SetPedKeepTask(ped, true)
+                activeFollowPedNet = tostring(netId or '')
+                notify('follow_on', 'Follow Me', 'Subject is following you on foot.', 'success', 'person-walking', '#38A169')
+              else
+                ClearPedTasks(ped)
+                SetPedKeepTask(ped, false)
+                SetBlockingOfNonTemporaryEvents(ped, false)
+                TaskStandStill(ped, 1500)
+                activeFollowPedNet = nil
+                notify('follow_off', 'Stop Follow', 'Subject was told to stop following.', 'inform', 'hand', '#4299E1')
+              end
+            end
+
+            Citizen.CreateThread(function()
+              while true do
+                if activeFollowPedNet and activeFollowPedNet ~= '' then
+                  local ped = safeNetToPed(tonumber(activeFollowPedNet) or activeFollowPedNet)
+                  if ped and ped ~= 0 and DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false) then
+                    TaskFollowToOffsetOfEntity(ped, PlayerPedId(), 0.0, -1.2, 0.0, 2.0, -1, 1.2, true)
+                    Citizen.Wait(800)
+                  else
+                    activeFollowPedNet = nil
+                    Citizen.Wait(500)
+                  end
+                else
+                  Citizen.Wait(500)
+                end
+              end
+            end)
+
+            local function getNearbyUsableVehicle(radius)
+              local player = PlayerPedId()
+              local coords = GetEntityCoords(player)
+              if IsPedInAnyVehicle(player, false) then
+                local veh = GetVehiclePedIsIn(player, false)
+                if veh and veh ~= 0 and DoesEntityExist(veh) then return veh end
+              end
+              if pullVeh and pullVeh ~= 0 and DoesEntityExist(pullVeh) and #(coords - GetEntityCoords(pullVeh)) <= (radius or 8.0) then
+                return pullVeh
+              end
+              if lib and lib.getClosestVehicle then
+                local v = lib.getClosestVehicle(coords, radius or 8.0, false)
+                if type(v) == 'table' then v = v.vehicle or v end
+                if v and v ~= 0 and DoesEntityExist(v) then return v end
+              end
+              return 0
+            end
+
+            local function seatIndexLabel(seat)
+              if seat == -1 then return 'Driver' end
+              if seat == 0 then return 'Front Passenger' end
+              if seat == 1 then return 'Rear Left' end
+              if seat == 2 then return 'Rear Right' end
+              return 'Seat ' .. tostring(seat)
+            end
+
+            local function tellPedEnterVehicle()
+              local ped, netId = getCurrentInteractionPed()
+              if not ped or not DoesEntityExist(ped) then
+                return notify('enter_none', 'No Subject', 'No nearby NPC available.', 'warning', 'car-side', '#DD6B20')
+              end
+              local veh = getNearbyUsableVehicle(10.0)
+              if not veh or veh == 0 or not DoesEntityExist(veh) then
+                return notify('enter_noveh', 'No Vehicle', 'No nearby vehicle found for the subject.', 'warning', 'car-side', '#DD6B20')
+              end
+              local seats = { -1, 0, 1, 2 }
+              local options = {}
+              for _, seat in ipairs(seats) do
+                options[#options + 1] = { value = tostring(seat), label = seatIndexLabel(seat) }
+              end
+              local input = lib and lib.inputDialog and lib.inputDialog('Tell Subject To Enter Vehicle', {
+                { type = 'select', label = 'Seat', options = options, required = true, default = tostring(IsVehicleSeatFree(veh, -1) and -1 or 0) }
+              }) or nil
+              if not input or not input[1] then return end
+              local seat = tonumber(input[1]) or 0
+              if not IsVehicleSeatFree(veh, seat) then
+                return notify('enter_busy', 'Seat Occupied', seatIndexLabel(seat) .. ' is occupied.', 'warning', 'car-side', '#DD6B20')
+              end
+              NetworkRequestControlOfEntity(ped)
+              NetworkRequestControlOfEntity(veh)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              ClearPedTasksImmediately(ped)
+              TaskEnterVehicle(ped, veh, 10000, seat, 1.25, 1, 0)
+              if netId and pedData and pedData[tostring(netId)] then
+                pedData[tostring(netId)].detainedVehicleNet = VehToNet(veh)
+                pedData[tostring(netId)].detainedSeat = seat
+                pedData[tostring(netId)].pulledInVehicle = true
+              end
+              notify('enter_start', 'Enter Vehicle', 'Subject was told to get into ' .. seatIndexLabel(seat) .. '.', 'inform', 'car-side', '#4299E1')
+            end
+
+            local getPrimaryOccupant
+
+            local function releasePulloverVehicle(veh)
+              if not veh or veh == 0 or not DoesEntityExist(veh) then return end
+              local occ = getPrimaryOccupant(veh)
+              NetworkRequestControlOfEntity(veh)
+              if occ and occ ~= 0 then NetworkRequestControlOfEntity(occ) end
+              if occ and occ ~= 0 and DoesEntityExist(occ) then
+                local occKey = tostring(safePedToNet(occ) or occ)
+                if pedData and pedData[occKey] then
+                  pedData[occKey].pulledProtected = false
+                  pedData[occKey].pulledInVehicle = false
+                  pedData[occKey].forcedStop = nil
+                  pedData[occKey].detainedVehicleNet = nil
+                  pedData[occKey].detainedSeat = nil
+                  pedData[occKey].allowVehicleExitUntil = nil
+                  pedData[occKey].preventVehicleReseatUntil = nil
+                  pedData[occKey].questioningInVehicle = nil
+                  pedData[occKey].stopAwaitingId = false
+                  pedData[occKey].cuffed = false
+                end
+                setPedProtected(occKey, false)
+                markPulledInVehicle(occKey, false)
+                SetEnableHandcuffs(occ, false)
+                ClearPedSecondaryTask(occ)
+                SetBlockingOfNonTemporaryEvents(occ, false)
+                SetPedCanRagdoll(occ, true)
+                SetPedKeepTask(occ, false)
+                if not IsPedInVehicle(occ, veh, false) or GetPedInVehicleSeat(veh, -1) ~= occ then
+                  ClearPedTasksImmediately(occ)
+                  TaskWarpPedIntoVehicle(occ, veh, -1)
+                  Citizen.Wait(150)
+                  if not IsPedInVehicle(occ, veh, false) or GetPedInVehicleSeat(veh, -1) ~= occ then
+                    SetPedIntoVehicle(occ, veh, -1)
+                    Citizen.Wait(120)
+                  end
+                end
+              end
+              SetVehicleEngineOn(veh, true, true, true)
+              SetVehicleHandbrake(veh, false)
+              SetVehicleUndriveable(veh, false)
+              SetVehicleDoorsLocked(veh, 1)
+              SetVehicleBrakeLights(veh, false)
+              SetVehicleForwardSpeed(veh, math.max(GetEntitySpeed(veh), 2.5))
+              if occ and occ ~= 0 and DoesEntityExist(occ) then
+                local occKey = tostring(safePedToNet(occ) or occ)
+                SetDriverAbility(occ, Config.Flee.driverAbility or 1.0)
+                SetDriverAggressiveness(occ, Config.Flee.driverAggressiveness or 0.35)
+                SetPedKeepTask(occ, true)
+                local function taskDriveAwayNow()
+                  if not (DoesEntityExist(veh) and DoesEntityExist(occ)) then return end
+                  ClearPedTasks(occ)
+                  SetPedKeepTask(occ, true)
+                  SetVehicleEngineOn(veh, true, true, true)
+                  SetVehicleHandbrake(veh, false)
+                  SetVehicleUndriveable(veh, false)
+                  SetVehicleDoorsLocked(veh, 1)
+                  SetVehicleBrakeLights(veh, false)
+                  SetVehicleForwardSpeed(veh, math.max(GetEntitySpeed(veh), 4.5))
+                  local base = GetEntityCoords(veh)
+                  local heading = math.rad(GetEntityHeading(veh))
+                  local tx = base.x - math.sin(heading) * 120.0
+                  local ty = base.y + math.cos(heading) * 120.0
+                  local tz = base.z + 0.5
+                  if type(SetDriveTaskDrivingStyle) == 'function' then pcall(SetDriveTaskDrivingStyle, occ, Config.Wander.driveStyle) end
+                  if type(SetDriveTaskCruiseSpeed) == 'function' then pcall(SetDriveTaskCruiseSpeed, occ, math.max(10.0, tonumber(Config.Wander.driveSpeed) or 16.0)) end
+                  if type(TaskVehicleDriveToCoordLongrange) == 'function' then
+                    TaskVehicleDriveToCoordLongrange(occ, veh, tx, ty, tz, math.max(10.0, tonumber(Config.Wander.driveSpeed) or 16.0), Config.Wander.driveStyle, 10.0)
+                  else
+                    TaskVehicleDriveWander(occ, veh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
+                  end
+                end
+
+                -- Finishing a pull-over should always release the driver in-place and let them drive away.
+                -- Do not convert the release into an attack/flee-on-foot just because the record is suspended/wanted.
+                taskDriveAwayNow()
+                Citizen.CreateThread(function()
+                  local startedAt = GetGameTimer()
+                  local startPos = GetEntityCoords(veh)
+                  while GetGameTimer() - startedAt < 8000 do
+                    if not DoesEntityExist(veh) or not DoesEntityExist(occ) then return end
+                    if not IsPedInVehicle(occ, veh, false) or GetPedInVehicleSeat(veh, -1) ~= occ then
+                      ClearPedTasksImmediately(occ)
+                      TaskWarpPedIntoVehicle(occ, veh, -1)
+                      Citizen.Wait(150)
+                      if not IsPedInVehicle(occ, veh, false) or GetPedInVehicleSeat(veh, -1) ~= occ then
+                        SetPedIntoVehicle(occ, veh, -1)
+                      end
+                    end
+                    if #(GetEntityCoords(veh) - startPos) > 12.0 then return end
+                    taskDriveAwayNow()
+                    Citizen.Wait(800)
+                  end
+                  if DoesEntityExist(veh) and DoesEntityExist(occ) then
+                    TaskVehicleDriveWander(occ, veh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
+                    if type(SetDriveTaskCruiseSpeed) == 'function' then pcall(SetDriveTaskCruiseSpeed, occ, math.max(10.0, tonumber(Config.Wander.driveSpeed) or 16.0)) end
+                  end
+                end)
+              end
+              pullVeh = nil
+              notify('pull_finish', 'Pull-Over', 'Complete. Vehicle released.', 'success', 'car-side', '#38A169')
+            end
             local function getPedName(netId)
               local d = pedData[tostring(netId)]
               return (d and d.name) or "Unknown Unknown"
+            end
+
+            local function loadAnimDictTimed(dict, timeout)
+              timeout = timeout or 1200
+              if HasAnimDictLoaded(dict) then return true end
+              RequestAnimDict(dict)
+              local started = GetGameTimer()
+              while not HasAnimDictLoaded(dict) and (GetGameTimer() - started) < timeout do Citizen.Wait(10) end
+              return HasAnimDictLoaded(dict)
+            end
+
+            local function playSimpleConversationAnim(ped, mode)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              local player = PlayerPedId()
+              local pedInVehicle = IsPedInAnyVehicle(ped, false)
+              if pedInVehicle then
+                TaskLookAtEntity(ped, player, 2500, 2048, 3)
+                return
+              end
+              TaskTurnPedToFaceEntity(ped, player, 1200)
+              TaskLookAtEntity(ped, player, 2500, 2048, 3)
+              local dict = "mp_common"
+              if loadAnimDictTimed(dict, 1200) then
+                if mode == "handoff" then
+                  TaskPlayAnim(player, dict, "givetake1_a", 4.0, -4.0, 1400, 49, 0.0, false, false, false)
+                end
+                TaskPlayAnim(ped, dict, "givetake1_b", 4.0, -4.0, 1400, 49, 0.0, false, false, false)
+              end
+            end
+
+            local function getStoredDetainedVehicle(netId, fallbackVeh)
+              local veh = fallbackVeh
+              if veh and veh ~= 0 and DoesEntityExist(veh) then return veh end
+              local info = netId and pedData and pedData[tostring(netId)] or nil
+              if info and info.detainedVehicleNet then
+                local netVeh = safeNetworkGetEntityFromNetworkId(tonumber(info.detainedVehicleNet) or info.detainedVehicleNet)
+                if netVeh and netVeh ~= 0 and DoesEntityExist(netVeh) then
+                  return netVeh
+                end
+              end
+              if pullVeh and pullVeh ~= 0 and DoesEntityExist(pullVeh) then return pullVeh end
+              return 0
+            end
+
+            rememberDetainedVehicleState = function(ped, netId, veh)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              if not netId then netId = safePedToNet(ped) or tostring(ped) end
+              if not netId then return end
+              pedData[tostring(netId)] = pedData[tostring(netId)] or {}
+              pedData[tostring(netId)].allowVehicleExitUntil = nil
+              pedData[tostring(netId)].preventVehicleReseatUntil = nil
+              if veh and veh ~= 0 and DoesEntityExist(veh) then
+                pedData[tostring(netId)].detainedVehicleNet = VehToNet(veh)
+                for seat = -1, GetVehicleMaxNumberOfPassengers(veh) - 1 do
+                  if GetPedInVehicleSeat(veh, seat) == ped then
+                    pedData[tostring(netId)].detainedSeat = seat
+                    break
+                  end
+                end
+              end
+            end
+
+            local function shouldKeepPedSeated(info)
+              if not info then return false end
+              local now = GetGameTimer()
+              local allowExitUntil = tonumber(info.allowVehicleExitUntil or 0) or 0
+              local preventReseatUntil = tonumber(info.preventVehicleReseatUntil or 0) or 0
+              if allowExitUntil > now or preventReseatUntil > now then
+                return false
+              end
+              if info.pulledInVehicle or info.pulledProtected then
+                return true
+              end
+              if info.cuffed and info.detainedVehicleNet then
+                return true
+              end
+              return false
+            end
+
+            local function enforcePedRemainSeated(ped, netId, fallbackVeh)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              local info = netId and pedData and pedData[tostring(netId)] or nil
+              if info and not shouldKeepPedSeated(info) and not IsPedInAnyVehicle(ped, false) then
+                return false
+              end
+              if IsPedInAnyVehicle(ped, false) then
+                rememberDetainedVehicleState(ped, netId, GetVehiclePedIsIn(ped, false))
+                return true
+              end
+
+              local veh = getStoredDetainedVehicle(netId, fallbackVeh)
+              if not veh or veh == 0 or not DoesEntityExist(veh) then return false end
+
+              local info = netId and pedData and pedData[tostring(netId)] or nil
+              local preferredSeat = (info and tonumber(info.detainedSeat)) or -1
+              local seat = preferredSeat
+              if seat < -1 then seat = -1 end
+              if GetPedInVehicleSeat(veh, seat) ~= 0 and GetPedInVehicleSeat(veh, seat) ~= ped then
+                local foundFree = false
+                for trySeat = -1, GetVehicleMaxNumberOfPassengers(veh) - 1 do
+                  local occ = GetPedInVehicleSeat(veh, trySeat)
+                  if occ == 0 or occ == ped then
+                    seat = trySeat
+                    foundFree = true
+                    break
+                  end
+                end
+                if not foundFree then return false end
+              end
+
+              NetworkRequestControlOfEntity(ped)
+              NetworkRequestControlOfEntity(veh)
+              SetEntityAsMissionEntity(ped, true, true)
+              SetEntityAsMissionEntity(veh, true, true)
+              ClearPedTasksImmediately(ped)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              SetPedKeepTask(ped, true)
+              TaskWarpPedIntoVehicle(ped, veh, seat)
+              Citizen.Wait(50)
+              if not (IsPedInVehicle(ped, veh, false) and GetPedInVehicleSeat(veh, seat) == ped) then
+                SetPedIntoVehicle(ped, veh, seat)
+                Citizen.Wait(50)
+              end
+              if IsPedInVehicle(ped, veh, false) then
+                rememberDetainedVehicleState(ped, netId, veh)
+                return true
+              end
+              return false
+            end
+
+            local function requestPedIdentification(ped, netId)
+              local pedKey = tostring(netId or safePedToNet(ped) or ped)
+              local person = ensurePerson(pedKey)
+              person.idRequests = tonumber(person.idRequests or 0) or 0
+              person.idRequests = person.idRequests + 1
+              local refusalChance = tonumber(person.idRefusalChance or 0.18) or 0.18
+              local info = pedData and pedData[pedKey] or nil
+              local protectedStop = info and (info.pulledInVehicle or info.pulledProtected)
+              local forcedStop = info and info.forcedStop
+              if person.idRequests >= 2 then refusalChance = refusalChance * 0.5 end
+              if person.hasIllegalItems then refusalChance = math.max(refusalChance, 0.32) end
+              if person.isDrunk or person.isHigh then refusalChance = math.max(refusalChance, 0.28) end
+              if IsPedInAnyVehicle(ped, false) or protectedStop then refusalChance = math.max(0.05, refusalChance - 0.05) end
+              if forcedStop then refusalChance = 0.0 end
+
+              if protectedStop then
+                enforcePedRemainSeated(ped, pedKey)
+                TaskLookAtEntity(ped, PlayerPedId(), 2500, 2048, 3)
+              end
+
+              if math.random() < refusalChance then
+                person.lastIdOutcome = "refused"
+                if protectedStop then
+                  holdPedAttention(ped, true)
+                else
+                  playSimpleConversationAnim(ped, "refuse")
+                  holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
+                end
+                notify("id_refuse","ID Check","Ped refuses to provide identification.",'warning','triangle-exclamation','#DD6B20')
+                return false, person
+              end
+              person.lastIdOutcome = "provided"
+              if protectedStop then
+                holdPedAttention(ped, true)
+              else
+                playSimpleConversationAnim(ped, "handoff")
+                holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
+              end
+              return true, person
             end
 
             local function showIDCard(d)
@@ -598,10 +1433,126 @@ local stopEnabled, debugEnabled = true, true
                 'success','id-card','#38A169')
             end
 
+            local function splitFullNameForMDT(value)
+              local text = tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+              if text == '' then return '', '' end
+              local parts = {}
+              for token in text:gmatch('%S+') do parts[#parts + 1] = token end
+              if #parts <= 1 then return text, '' end
+              local first = table.remove(parts, 1) or ''
+              return first, table.concat(parts, ' ')
+            end
+
+local ALT_OWNER_FIRST = { 'Aiden', 'Mason', 'Noah', 'Ethan', 'Lucas', 'Levi', 'Owen', 'Wyatt', 'Nora', 'Layla', 'Ava', 'Mia', 'Ella', 'Zoe', 'Ivy', 'Ruby' }
+local ALT_OWNER_LAST = { 'Parker', 'Turner', 'Hayes', 'Brooks', 'Bennett', 'Foster', 'Coleman', 'Reed', 'Sullivan', 'Murphy', 'Fisher', 'Powell', 'Howard', 'Jenkins', 'Bishop', 'Barnes' }
+
+local function randomAlternateVehicleOwnerName(fallback)
+  fallback = tostring(fallback or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  local candidate = ALT_OWNER_FIRST[math.random(#ALT_OWNER_FIRST)] .. ' ' .. ALT_OWNER_LAST[math.random(#ALT_OWNER_LAST)]
+  if fallback ~= '' and candidate == fallback then
+    candidate = ALT_OWNER_FIRST[((math.random(#ALT_OWNER_FIRST)) % #ALT_OWNER_FIRST) + 1] .. ' ' .. ALT_OWNER_LAST[((math.random(#ALT_OWNER_LAST)) % #ALT_OWNER_LAST) + 1]
+  end
+  return candidate
+end
+
+local function getVehicleLookupIdentityProfile(pedKey, plate, fallbackOwnerName)
+  pedKey = tostring(pedKey or '')
+  plate = tostring(plate or ''):gsub('^%s+', ''):gsub('%s+$', ''):upper()
+  fallbackOwnerName = tostring(fallbackOwnerName or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if pedKey == '' or plate == '' then
+    return {
+      ownerName = fallbackOwnerName,
+      status = 'VALID',
+      registeredToDriver = fallbackOwnerName ~= ''
+    }
+  end
+
+  pedData[pedKey] = pedData[pedKey] or {}
+  local info = pedData[pedKey]
+  info._vehicleLookupProfile = type(info._vehicleLookupProfile) == 'table' and info._vehicleLookupProfile or {}
+
+  if info._vehicleLookupProfile[plate] then
+    return info._vehicleLookupProfile[plate]
+  end
+
+  local cfg = ((Config and Config.Immersion and Config.Immersion.vehicleContext) or {})
+
+  local mismatchChance = tonumber(cfg.ownerMismatchBase) or 0.12
+  if info.wanted then mismatchChance = math.max(mismatchChance, tonumber(cfg.ownerMismatchWanted) or 0.40) end
+  if info.hasIllegalItems then mismatchChance = math.max(mismatchChance, tonumber(cfg.ownerMismatchIllegalItems) or 0.28) end
+  if info.suspended then mismatchChance = math.max(mismatchChance, tonumber(cfg.ownerMismatchSuspended) or 0.22) end
+  if info.isDrunk or info.isHigh then mismatchChance = math.max(mismatchChance, tonumber(cfg.ownerMismatchImpaired) or 0.18) end
+
+  local noneChance = tonumber(cfg.noRegistrationBase) or 0.03
+  if info.wanted then noneChance = math.max(noneChance, tonumber(cfg.noRegistrationWanted) or 0.18) end
+  if info.hasIllegalItems then noneChance = math.max(noneChance, tonumber(cfg.noRegistrationIllegalItems) or 0.12) end
+
+  local suspendedChance = tonumber(cfg.suspendedRegistrationBase) or 0.02
+  if info.suspended then suspendedChance = math.max(suspendedChance, tonumber(cfg.suspendedRegistrationSuspended) or 0.18) end
+
+  local expiredChance = tonumber(cfg.expiredRegistrationBase) or 0.08
+  if info.wanted then expiredChance = math.max(expiredChance, tonumber(cfg.expiredRegistrationWanted) or 0.14) end
+  if info.hasIllegalItems then expiredChance = math.max(expiredChance, tonumber(cfg.expiredRegistrationIllegalItems) or 0.12) end
+
+  local ownerName = fallbackOwnerName
+  local registeredToDriver = true
+  if fallbackOwnerName == '' or math.random() < mismatchChance then
+    ownerName = randomAlternateVehicleOwnerName(fallbackOwnerName)
+    registeredToDriver = false
+  end
+
+  local status = 'VALID'
+  local roll = math.random()
+  if roll < noneChance then
+    status = 'NONE'
+  elseif roll < (noneChance + suspendedChance) then
+    status = 'SUSPENDED'
+  elseif roll < (noneChance + suspendedChance + expiredChance) then
+    status = 'EXPIRE'
+  end
+
+  local profile = {
+    ownerName = ownerName ~= '' and ownerName or fallbackOwnerName,
+    status = status,
+    registeredToDriver = registeredToDriver
+  }
+
+  info._vehicleLookupProfile[plate] = profile
+  pedData[pedKey] = info
+  return profile
+end
+
             local function showID(netId)
+              local ped = safeNetToPed(netId)
               local d = pedData[tostring(netId)]
               if not d then
                 return notify("no_id","ID Check","No ID data for this ped.",'error','id-badge','#C53030')
+              end
+              if ped and DoesEntityExist(ped) then
+                local okToShow = requestPedIdentification(ped, netId)
+                if not okToShow then return end
+              end
+              local mdtFirst, mdtLast = splitFullNameForMDT((d and d.name) or tostring(netId or ''))
+              local shouldOpenExternal = Config and Config.MDT and Config.MDT.openExternalOnCheckId == true
+              if shouldOpenExternal and openExternalMDT({
+                kind = 'name',
+                preservePage = true,
+                prefillOnly = true,
+                autoSearch = false,
+                search = {
+                  kind = 'name',
+                  value = (d and d.name) or tostring(netId or ''),
+                  name = (d and d.name) or tostring(netId or ''),
+                  first = mdtFirst,
+                  last = mdtLast,
+                  netId = tostring(netId or ''),
+                  source = 'az5pd',
+                  preservePage = true,
+                  prefillOnly = true,
+                  autoSearch = false
+                }
+              }) then
+                return showIDCard(d)
               end
               TriggerServerEvent('mdt:lookupID', netId)
               showIDCard(d)
@@ -630,8 +1581,8 @@ local stopEnabled, debugEnabled = true, true
                   return ent, nid
                 end
 
-                local ok, ent2 = pcall(function() return NetworkGetEntityFromNetworkId(tonumber(lastPedNetId) or lastPedNetId) end)
-                if ok and ent2 and ent2 ~= 0 and DoesEntityExist(ent2) then
+                local ent2 = safeNetworkGetEntityFromNetworkId(tonumber(lastPedNetId) or lastPedNetId)
+                if ent2 and ent2 ~= 0 and DoesEntityExist(ent2) then
                   local ok2, nid2 = pcall(function() return PedToNet(ent2) end)
                   if ok2 and nid2 and nid2 ~= 0 then
                     dprint("resolveLastPed: secondary resolved entity with netid", nid2)
@@ -643,6 +1594,407 @@ local stopEnabled, debugEnabled = true, true
 
               dprint("resolveLastPed: failed to resolve ped")
               return nil, nil
+            end
+
+            local function cachePedReference(ped, key)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return tostring(key or '') end
+              local pedKey = tostring(key or safePedToNet(ped) or ped)
+              ensurePerson(pedKey)
+              pedData[pedKey] = pedData[pedKey] or {}
+              pedData[pedKey].entity = ped
+              local safeNet = safePedToNet(ped)
+              if safeNet and safeNet ~= 0 then
+                pedData[pedKey].netId = tostring(safeNet)
+              else
+                pedData[pedKey].netId = pedData[pedKey].netId or tostring(key or '')
+              end
+              return pedKey
+            end
+
+            local function resolveTrackedPedFromKey(key, info)
+              local entry = info or pedData[tostring(key)]
+              if entry and entry.entity and DoesEntityExist(entry.entity) then
+                return entry.entity, tostring((entry.netId and entry.netId ~= '') and entry.netId or key)
+              end
+
+              local candidateKey = nil
+              if entry and entry.netId and tostring(entry.netId) ~= '' then
+                candidateKey = entry.netId
+              else
+                candidateKey = key
+              end
+
+              local ped = safeNetToPed(candidateKey)
+              if ped and ped ~= 0 and DoesEntityExist(ped) then
+                if entry then entry.entity = ped end
+                return ped, tostring(candidateKey)
+              end
+
+              return nil, tostring(candidateKey or key or '')
+            end
+
+            local function playCuffedIdleAnim(ped)
+              if not ped or ped == 0 or not DoesEntityExist(ped) or IsPedInAnyVehicle(ped, false) then return false end
+              local dict = "mp_arresting"
+              if not loadAnimDictTimed(dict, 800) then return false end
+              if not IsEntityPlayingAnim(ped, dict, "idle", 3) then
+                TaskPlayAnim(ped, dict, "idle", 8.0, -8.0, -1, 49, 0.0, false, false, false)
+              end
+              return true
+            end
+
+            local function buildPedAliasKeys(ped, pedKey)
+              pedData = pedData or {}
+              local aliases, seen = {}, {}
+
+              local function remember(key)
+                if key == nil then return end
+                key = tostring(key)
+                if key == '' or seen[key] then return end
+                seen[key] = true
+                aliases[#aliases + 1] = key
+              end
+
+              remember(pedKey)
+              if ped and ped ~= 0 and DoesEntityExist(ped) then
+                remember(safePedToNet(ped))
+                remember(ped)
+              end
+
+              local pedNet = (ped and ped ~= 0 and DoesEntityExist(ped)) and tostring(safePedToNet(ped) or '') or ''
+              for key, info in pairs(pedData) do
+                if info then
+                  local sameEntity = ped and info.entity and info.entity == ped
+                  local sameNet = pedNet ~= '' and tostring(info.netId or '') == pedNet
+                  local sameKey = pedKey and (tostring(key) == tostring(pedKey) or tostring(info.netId or '') == tostring(pedKey) or tostring(info.cuffCanonicalKey or '') == tostring(pedKey))
+                  if sameEntity or sameNet or sameKey then
+                    remember(key)
+                    remember(info.netId)
+                    remember(info.cuffCanonicalKey)
+                  end
+                end
+              end
+
+              return aliases
+            end
+
+            local function getPedCanonicalCuffKey(ped, pedKey)
+              local net = (ped and ped ~= 0 and DoesEntityExist(ped)) and safePedToNet(ped) or nil
+              return tostring(net or pedKey or ped or '')
+            end
+
+            local function isPedActuallyCuffed(ped, pedKey)
+              local canonical = getPedCanonicalCuffKey(ped, pedKey)
+              if canonical ~= '' and pedData[canonical] and pedData[canonical].cuffed == true then
+                return true, canonical
+              end
+
+              local aliases = buildPedAliasKeys(ped, pedKey)
+              for _, key in ipairs(aliases) do
+                local info = pedData[key]
+                if info and info.cuffed == true then
+                  return true, tostring(info.cuffCanonicalKey or key)
+                end
+              end
+
+              return false, canonical ~= '' and canonical or tostring(pedKey or '')
+            end
+
+            local function markPedCuffedState(ped, netId, state)
+              local canonical = getPedCanonicalCuffKey(ped, netId)
+              if canonical == '' then return nil end
+
+              local aliases = buildPedAliasKeys(ped, canonical)
+              local seenCanonical = false
+              for _, key in ipairs(aliases) do
+                if key == canonical then seenCanonical = true break end
+              end
+              if not seenCanonical then aliases[#aliases + 1] = canonical end
+
+              local cooloffUntil = GetGameTimer() + 2200
+              for _, key in ipairs(aliases) do
+                ensurePerson(key)
+                pedData[key] = pedData[key] or {}
+                pedData[key].cuffCanonicalKey = canonical
+                pedData[key].cuffed = state and true or false
+                pedData[key].entity = (ped and DoesEntityExist(ped)) and ped or pedData[key].entity
+                local safeNet = (ped and DoesEntityExist(ped)) and safePedToNet(ped) or nil
+                if safeNet and safeNet ~= 0 then
+                  pedData[key].netId = tostring(safeNet)
+                elseif pedData[key].netId == nil then
+                  pedData[key].netId = canonical
+                end
+                if state then
+                  pedData[key].recentlyUncuffedUntil = nil
+                  pedData[key].lastCuffAppliedAt = GetGameTimer()
+                else
+                  pedData[key].recentlyUncuffedUntil = cooloffUntil
+                end
+              end
+
+              if state then
+                lastCuffedPedNetId = canonical
+                if ped and DoesEntityExist(ped) then lastCuffedPedEntity = ped end
+              else
+                if tostring(lastCuffedPedNetId or '') == canonical then lastCuffedPedNetId = nil end
+                if ped and lastCuffedPedEntity == ped then lastCuffedPedEntity = nil end
+              end
+
+              return canonical
+            end
+
+            local function clearTrackedCuffStateForPed(ped, pedKey)
+              local canonical = getPedCanonicalCuffKey(ped, pedKey)
+              local aliases = buildPedAliasKeys(ped, canonical)
+              local seenCanonical = false
+              for _, key in ipairs(aliases) do
+                if key == canonical then seenCanonical = true break end
+              end
+              if canonical ~= '' and not seenCanonical then aliases[#aliases + 1] = canonical end
+
+              local cooloffUntil = GetGameTimer() + 2200
+              for _, key in ipairs(aliases) do
+                ensurePerson(key)
+                pedData[key] = pedData[key] or {}
+                pedData[key].cuffed = false
+                pedData[key].cuffCanonicalKey = canonical ~= '' and canonical or pedData[key].cuffCanonicalKey
+                pedData[key].recentlyUncuffedUntil = cooloffUntil
+                if ped and DoesEntityExist(ped) then
+                  pedData[key].entity = ped
+                  local net = safePedToNet(ped)
+                  if net and net ~= 0 then
+                    pedData[key].netId = tostring(net)
+                  end
+                end
+              end
+            end
+
+            local function resetPedCuffPresentation(ped, keepDetained, releaseAttention)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              NetworkRequestControlOfEntity(ped)
+
+              if IsEntityAttached(ped) then
+                DetachEntity(ped, true, false)
+              end
+
+              for _ = 1, 4 do
+                StopAnimTask(ped, "mp_arresting", "idle", 1.0)
+                StopAnimTask(ped, "mp_arrest_paired", "crook_p2_back_left", 1.0)
+                StopAnimTask(ped, "mp_arrest_paired", "crook_p2_back_right", 1.0)
+                ClearPedSecondaryTask(ped)
+                if not IsPedInAnyVehicle(ped, false) then
+                  ClearPedTasksImmediately(ped)
+                  Citizen.Wait(0)
+                  ClearPedTasks(ped)
+                end
+                ResetPedMovementClipset(ped, 0.0)
+                ResetPedStrafeClipset(ped)
+                ResetPedWeaponMovementClipset(ped)
+                SetEnableHandcuffs(ped, false)
+                Citizen.Wait(0)
+              end
+
+              SetPedCanRagdoll(ped, true)
+              SetPedCanPlayAmbientAnims(ped, true)
+              SetPedCanPlayAmbientBaseAnims(ped, true)
+              SetPedKeepTask(ped, keepDetained and true or false)
+              SetBlockingOfNonTemporaryEvents(ped, keepDetained and true or false)
+
+              if keepDetained then
+                if IsPedInAnyVehicle(ped, false) then
+                  holdPedAttention(ped, true)
+                else
+                  TaskStandStill(ped, 900)
+                  TaskTurnPedToFaceEntity(ped, PlayerPedId(), 900)
+                  holdPedAttention(ped, false)
+                end
+              elseif releaseAttention then
+                releasePedAttention(ped, true)
+              end
+
+              return true
+            end
+
+            local function enforceCuffedPedState(ped, pedKey, info)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              local isCuffed, canonical = isPedActuallyCuffed(ped, pedKey)
+              if not isCuffed then return false end
+
+              pedKey = cachePedReference(ped, canonical ~= '' and canonical or pedKey)
+              NetworkRequestControlOfEntity(ped)
+              SetEnableHandcuffs(ped, true)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              SetPedCanRagdoll(ped, false)
+              SetPedKeepTask(ped, true)
+
+              if isDragging and draggedPed == ped and IsEntityAttached(ped) then
+                return true
+              end
+
+              if IsPedInAnyVehicle(ped, false) then
+                rememberDetainedVehicleState(ped, pedKey, GetVehiclePedIsIn(ped, false))
+                holdPedAttention(ped, true)
+                return true
+              end
+
+              if shouldKeepPedSeated(info) then
+                if enforcePedRemainSeated(ped, pedKey) then
+                  holdPedAttention(ped, true)
+                  return true
+                end
+              end
+
+              local now = GetGameTimer()
+              info = info or pedData[pedKey] or {}
+              info.nextGroundHoldAt = tonumber(info.nextGroundHoldAt or 0) or 0
+              if info.nextGroundHoldAt <= now then
+                info.nextGroundHoldAt = now + ((Config.PedCustody and Config.PedCustody.groundHoldCooldownMs) or 900)
+                TaskTurnPedToFaceEntity(ped, PlayerPedId(), 1200)
+                TaskLookAtEntity(ped, PlayerPedId(), 1200, 2048, 3)
+                TaskStandStill(ped, ((Config.PedCustody and Config.PedCustody.groundHoldMs) or 1500))
+              end
+              playCuffedIdleAnim(ped)
+              return true
+            end
+
+            resolveCuffedPed = function()
+              if draggedPed and DoesEntityExist(draggedPed) then
+                local isCuffed, canonical = isPedActuallyCuffed(draggedPed, lastCuffedPedNetId or safePedToNet(draggedPed) or draggedPed)
+                if isCuffed then
+                  cachePedReference(draggedPed, canonical)
+                  return draggedPed, tostring(canonical)
+                end
+              end
+
+              if lastCuffedPedEntity and DoesEntityExist(lastCuffedPedEntity) then
+                local isCuffed, canonical = isPedActuallyCuffed(lastCuffedPedEntity, lastCuffedPedNetId or safePedToNet(lastCuffedPedEntity) or lastCuffedPedEntity)
+                if isCuffed then
+                  cachePedReference(lastCuffedPedEntity, canonical)
+                  return lastCuffedPedEntity, tostring(canonical)
+                end
+              end
+
+              if lastCuffedPedNetId then
+                local info = pedData[tostring(lastCuffedPedNetId)]
+                local ent = select(1, resolveTrackedPedFromKey(lastCuffedPedNetId, info))
+                if ent and ent ~= 0 and DoesEntityExist(ent) then
+                  local isCuffed, canonical = isPedActuallyCuffed(ent, lastCuffedPedNetId)
+                  if isCuffed then
+                    cachePedReference(ent, canonical)
+                    return ent, tostring(canonical)
+                  end
+                end
+              end
+
+              local ped, nid = resolveLastPed()
+              if ped and DoesEntityExist(ped) then
+                local isCuffed, canonical = isPedActuallyCuffed(ped, nid or safePedToNet(ped) or ped)
+                if isCuffed then
+                  lastCuffedPedNetId = tostring(canonical)
+                  lastCuffedPedEntity = ped
+                  cachePedReference(ped, canonical)
+                  return ped, tostring(canonical)
+                end
+              end
+
+              local processed = {}
+              for key, info in pairs(pedData) do
+                local canonical = tostring((info and info.cuffCanonicalKey) or key)
+                if not processed[canonical] then
+                  processed[canonical] = true
+                  local ped = select(1, resolveTrackedPedFromKey(canonical, info))
+                  if ped and DoesEntityExist(ped) then
+                    local isCuffed = isPedActuallyCuffed(ped, canonical)
+                    if isCuffed then
+                      lastCuffedPedNetId = canonical
+                      lastCuffedPedEntity = ped
+                      cachePedReference(ped, canonical)
+                      return ped, canonical
+                    end
+                  end
+                end
+              end
+
+              return nil, nil
+            end
+
+            local function applyCuffedPedState(ped, netId, keepDraggedReference)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              local pedKey = markPedCuffedState(ped, netId, true)
+              cachePedReference(ped, pedKey)
+              NetworkRequestControlOfEntity(ped)
+              SetEnableHandcuffs(ped, true)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              SetPedCanRagdoll(ped, false)
+              SetPedKeepTask(ped, true)
+              if IsPedInAnyVehicle(ped, false) then
+                rememberDetainedVehicleState(ped, pedKey, GetVehiclePedIsIn(ped, false))
+              end
+              if keepDraggedReference then draggedPed = ped end
+              lastPedEntity = ped
+              lastPedNetId = pedKey
+              if holdPedAttention then holdPedAttention(ped, IsPedInAnyVehicle(ped, false)) end
+              if not IsPedInAnyVehicle(ped, false) and not (isDragging and draggedPed == ped and IsEntityAttached(ped)) then
+                playCuffedIdleAnim(ped)
+              end
+              return true
+            end
+
+
+            local function sendPedOnReleaseWalk(ped)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              if IsPedInAnyVehicle(ped, false) then return end
+
+              local player = PlayerPedId()
+              local pedCoords = GetEntityCoords(ped)
+              local playerCoords = GetEntityCoords(player)
+              local dir = vector3(pedCoords.x - playerCoords.x, pedCoords.y - playerCoords.y, 0.0)
+              local len = math.sqrt((dir.x * dir.x) + (dir.y * dir.y))
+              if len < 0.25 then
+                local fwd = GetEntityForwardVector(player)
+                dir = vector3(-fwd.x, -fwd.y, 0.0)
+                len = math.sqrt((dir.x * dir.x) + (dir.y * dir.y))
+              end
+              if len < 0.25 then len = 1.0 end
+              dir = vector3(dir.x / len, dir.y / len, 0.0)
+              local walkTo = vector3(pedCoords.x + dir.x * 10.0, pedCoords.y + dir.y * 10.0, pedCoords.z)
+
+              ClearPedTasksImmediately(ped)
+              SetBlockingOfNonTemporaryEvents(ped, false)
+              SetPedKeepTask(ped, true)
+              TaskGoToCoordAnyMeans(ped, walkTo.x, walkTo.y, walkTo.z, 1.2, 0, false, 786603, 0.0)
+              Citizen.CreateThread(function()
+                Citizen.Wait(3500)
+                if DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false) then
+                  ClearPedTasks(ped)
+                  TaskWanderStandard(ped, 10.0, 10)
+                end
+              end)
+            end
+
+            local function uncuffPedOnly(ped, netId, keepDetained)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              local pedKey = tostring(netId or safePedToNet(ped) or ped)
+              cachePedReference(ped, pedKey)
+              NetworkRequestControlOfEntity(ped)
+
+              if IsPedInAnyVehicle(ped, false) then
+                local veh = GetVehiclePedIsIn(ped, false)
+                if veh and veh ~= 0 and DoesEntityExist(veh) then
+                  SetVehicleDoorsLocked(veh, 1)
+                end
+              end
+
+              markPedCuffedState(ped, pedKey, false)
+              clearTrackedCuffStateForPed(ped, pedKey)
+              resetPedCuffPresentation(ped, keepDetained and true or false, not keepDetained)
+
+              if draggedPed == ped then draggedPed = nil end
+              isDragging = false
+
+              local sendNet = safePedToNet(ped) or tonumber(pedKey) or pedKey
+              TriggerServerEvent('police:cuffPed', tostring(sendNet or ''), false)
+              return true, getPedCanonicalCuffKey(ped, pedKey)
             end
 
             local function showIDSafely(netId)
@@ -664,12 +2016,15 @@ local stopEnabled, debugEnabled = true, true
                 return notify("no_id_exist","ID Check","Target no longer exists.",'error','id-badge','#C53030')
               end
 
-              lastPedNetId = tonumber(nid) or nid
+              local pedKey = tostring(tonumber(nid) or nid or safePedToNet(ped) or lastPedNetId or ped)
+              lastPedNetId = pedKey
               lastPedEntity = ped
 
               if IsPedInAnyVehicle(ped, false) then
-                setPedProtected(lastPedNetId, true)
-                markPulledInVehicle(lastPedNetId, true)
+                local detainedVeh = GetVehiclePedIsIn(ped, false)
+                setPedProtected(pedKey, true)
+                markPulledInVehicle(pedKey, true)
+                rememberDetainedVehicleState(ped, pedKey, detainedVeh)
 
                 NetworkRequestControlOfEntity(ped)
                 SetEntityAsMissionEntity(ped, true, true)
@@ -677,14 +2032,46 @@ local stopEnabled, debugEnabled = true, true
                 SetPedKeepTask(ped, true)
                 holdPedAttention(ped, true)
 
-                monitorKeepInVehicle(lastPedNetId, GetVehiclePedIsIn(ped, false), 8000)
+                monitorKeepInVehicle(pedKey, detainedVeh, 8000)
               end
 
-              TriggerServerEvent('mdt:lookupID', lastPedNetId)
+              -- Always ensure a local identity exists so the ID card never shows nil fields
+              local pdata = ensurePerson(pedKey)
+              local canShow = true
+              if pdata then canShow = requestPedIdentification(ped, pedKey) end
+              if not canShow then return end
 
-              if pedData[tostring(lastPedNetId)] or pedData[tostring(lastPedNetId)] then
-                showIDCard(pedData[tostring(lastPedNetId)] or pedData[tostring(lastPedNetId)])
+              local resolvedName = (pdata and pdata.name) or tostring(pedKey or '')
+              local mdtFirst, mdtLast = splitFullNameForMDT(resolvedName)
+              local shouldOpenExternal = Config and Config.MDT and Config.MDT.openExternalOnCheckId == true
+              if shouldOpenExternal then
+                openExternalMDT({
+                  kind = 'name',
+                  preservePage = true,
+                  prefillOnly = true,
+                  autoSearch = false,
+                  name = resolvedName,
+                  first = mdtFirst,
+                  last = mdtLast,
+                  netId = tostring(pedKey or ''),
+                  source = 'az5pd',
+                  search = {
+                    kind = 'name',
+                    value = resolvedName,
+                    name = resolvedName,
+                    first = mdtFirst,
+                    last = mdtLast,
+                    netId = tostring(pedKey or ''),
+                    source = 'az5pd',
+                    preservePage = true,
+                    prefillOnly = true,
+                    autoSearch = false
+                  }
+                })
               end
+
+              if pdata then showIDCard(pdata) end
+              TriggerServerEvent('mdt:lookupID', pedKey)
             end
 
             local function getVehicleDisplayName(veh)
@@ -712,20 +2099,149 @@ local stopEnabled, debugEnabled = true, true
               return ""
             end
 
+            local function getVehicleInFrontOfPlayerCar(distance)
+              local ped = PlayerPedId()
+              distance = tonumber(distance) or 16.0
+              if not DoesEntityExist(ped) then return nil end
+
+              local originEntity = ped
+              local from = GetEntityCoords(ped)
+              local forward = GetEntityForwardVector(ped)
+
+              if IsPedInAnyVehicle(ped, false) then
+                local playerVeh = GetVehiclePedIsIn(ped, false)
+                if playerVeh and playerVeh ~= 0 and DoesEntityExist(playerVeh) then
+                  originEntity = playerVeh
+                  from = GetOffsetFromEntityInWorldCoords(playerVeh, 0.0, 2.2, 0.6)
+                  forward = GetEntityForwardVector(playerVeh)
+                end
+              end
+
+              local to = vector3(from.x + forward.x * distance, from.y + forward.y * distance, from.z + forward.z * distance)
+              local ray = StartShapeTestRay(from.x, from.y, from.z, to.x, to.y, to.z, 10, originEntity, 0)
+              local _, hit, _, _, entity = GetShapeTestResult(ray)
+              if hit == 1 and entity and entity ~= 0 and DoesEntityExist(entity) and IsEntityAVehicle(entity) then
+                return entity
+              end
+              return nil
+            end
+
+            local function getBestMDTLookupVehicle(distance)
+              if pullVeh and DoesEntityExist(pullVeh) then return pullVeh end
+
+              local frontVeh = getVehicleInFrontOfPlayerCar(distance or 16.0)
+              if frontVeh and DoesEntityExist(frontVeh) then return frontVeh end
+
+              if lib and lib.getClosestVehicle then
+                local v = lib.getClosestVehicle(GetEntityCoords(PlayerPedId()), 8.0, false)
+                if type(v) == "table" then v = v.vehicle or nil end
+                if v and v ~= 0 and DoesEntityExist(v) then return v end
+              end
+
+              return nil
+            end
+
+            local function buildCurrentAz5PDMDTContext(kind)
+              local ctx = { source = 'az5pd' }
+              local ped, pedKey = resolveLastPed()
+              pedKey = tostring(pedKey or lastPedNetId or '')
+
+              if (not ped or ped == 0 or not DoesEntityExist(ped)) and lastPedEntity and DoesEntityExist(lastPedEntity) then
+                ped = lastPedEntity
+              end
+
+              if pedKey ~= '' then
+                local pdata = ensurePerson and ensurePerson(pedKey) or (pedData and pedData[pedKey]) or nil
+                if pdata and pdata.name and pdata.name ~= '' then
+                  ctx.name = pdata.name
+                  ctx.owner = pdata.name
+                  ctx.owner_name = pdata.name
+                  ctx.netId = pedKey
+                  local first, last = splitFullNameForMDT(pdata.name)
+                  ctx.first = first
+                  ctx.last = last
+                end
+              end
+
+              local veh = getBestMDTLookupVehicle(16.0)
+              if veh and DoesEntityExist(veh) then
+                local plateText = (GetVehicleNumberPlateText(veh) or ""):match("%S+")
+                if plateText and plateText ~= "" then
+                  ctx.plate = plateText:upper()
+                  ctx.lp = ctx.plate
+                  ctx.license = ctx.plate
+                  lastPlate = ctx.plate
+                end
+                ctx.model = getVehicleDisplayName(veh)
+                ctx.color = getVehicleColorHint(veh)
+                if ctx.model and ctx.model ~= '' then lastMake = ctx.model end
+                if ctx.color and ctx.color ~= '' then lastColor = ctx.color end
+              elseif lastPlate and tostring(lastPlate):match("%S+") then
+                ctx.plate = tostring(lastPlate):upper()
+                ctx.lp = ctx.plate
+                ctx.license = ctx.plate
+                ctx.model = lastMake or ''
+                ctx.color = lastColor or ''
+              end
+
+              if not ctx.owner_name or ctx.owner_name == '' then
+                local ownerName = getPedName(lastPedNetId) or ''
+                if ownerName ~= '' then
+                  ctx.owner = ownerName
+                  ctx.owner_name = ownerName
+                  if not ctx.name or ctx.name == '' then
+                    ctx.name = ownerName
+                    local first, last = splitFullNameForMDT(ownerName)
+                    ctx.first = ctx.first or first
+                    ctx.last = ctx.last or last
+                  end
+                end
+              end
+
+              if ctx.plate and ctx.plate ~= '' then
+                local profilePedKey = pedKey ~= '' and pedKey or tostring(lastPedNetId or '')
+                local fallbackOwnerName = ctx.owner_name or ctx.owner or ctx.name or ''
+                local vehicleProfile = getVehicleLookupIdentityProfile(profilePedKey, ctx.plate, fallbackOwnerName)
+                if vehicleProfile then
+                  if vehicleProfile.ownerName and vehicleProfile.ownerName ~= '' then
+                    ctx.owner = vehicleProfile.ownerName
+                    ctx.owner_name = vehicleProfile.ownerName
+                  end
+                  if vehicleProfile.status and vehicleProfile.status ~= '' then
+                    ctx.status = vehicleProfile.status
+                  end
+                  ctx.registered_to_driver = vehicleProfile.registeredToDriver == true
+                end
+              end
+
+              local desiredKind = tostring(kind or ''):lower()
+              if desiredKind == 'plate' then
+                ctx.kind = 'plate'
+                ctx.page = 'plateSearch'
+                ctx.value = ctx.plate or ''
+              elseif desiredKind == 'name' then
+                ctx.kind = 'name'
+                ctx.page = 'nameSearch'
+                ctx.value = ctx.name or ''
+              else
+                ctx.kind = (ctx.plate and ctx.plate ~= '') and 'plate' or 'name'
+                ctx.page = (ctx.kind == 'plate') and 'plateSearch' or 'nameSearch'
+                ctx.value = (ctx.kind == 'plate') and (ctx.plate or '') or (ctx.name or '')
+              end
+
+              return ctx
+            end
+
+            exports('GetCurrentMDTContext', function(kind)
+              return buildCurrentAz5PDMDTContext(kind)
+            end)
+
             local function runPlate()
               local plateTxt = lastPlate
               local makeTxt, colorTxt = lastMake, lastColor
 
               if (not plateTxt or plateTxt == "") then
-                local veh = nil
-                if pullVeh and DoesEntityExist(pullVeh) then
-                  veh = pullVeh
-                else
-                  if lib and lib.getClosestVehicle then
-                    local v = lib.getClosestVehicle(GetEntityCoords(PlayerPedId()),6.0,false)
-                    if type(v) == "table" then veh = v.vehicle or nil else veh = v end
-                  end
-                end
+                local veh = getBestMDTLookupVehicle(16.0)
 
                 if veh and DoesEntityExist(veh) then
                   plateTxt = (GetVehicleNumberPlateText(veh) or ""):match("%S+")
@@ -740,11 +2256,46 @@ local stopEnabled, debugEnabled = true, true
 
               if plateTxt and plateTxt:match("%S+") then
                 lastPlate = plateTxt:upper()
+                local stoppedOwnerName = getPedName(lastPedNetId) or ''
+                local lookupProfile = getVehicleLookupIdentityProfile(tostring(lastPedNetId or ''), lastPlate, stoppedOwnerName)
+                local lookupOwnerName = (lookupProfile and lookupProfile.ownerName) or stoppedOwnerName
+                local lookupStatus = (lookupProfile and lookupProfile.status) or 'VALID'
 
-                TriggerServerEvent('mdt:lookupPlate', lastPlate, getPedName(lastPedNetId), lastMake or "", lastColor or "")
+                if openExternalMDT({
+                  kind = 'plate',
+                  preservePage = true,
+                  prefillOnly = true,
+                  autoSearch = false,
+                  plate = lastPlate,
+                  license = lastPlate,
+                  lp = lastPlate,
+                  owner = lookupOwnerName,
+                  owner_name = lookupOwnerName,
+                  model = lastMake or '',
+                  color = lastColor or '',
+                  status = lookupStatus,
+                  source = 'az5pd',
+                  search = {
+                    kind = 'plate',
+                    value = lastPlate,
+                    plate = lastPlate,
+                    license = lastPlate,
+                    lp = lastPlate,
+                    owner = lookupOwnerName,
+                    owner_name = lookupOwnerName,
+                    model = lastMake or '',
+                    color = lastColor or '',
+                    status = lookupStatus,
+                    source = 'az5pd',
+                    preservePage = true,
+                    prefillOnly = true,
+                    autoSearch = false
+                  }
+                }) then return end
+                TriggerServerEvent('mdt:lookupPlate', lastPlate, lookupOwnerName, lastMake or "", lastColor or "", lookupStatus)
               else
                 notify("plate_failed","Lookup Failed",
-                      "No vehicle plate found. Pull someone over first or type one.",
+                      "No vehicle plate found. Pull someone over first or use the vehicle in front of your car.",
                       'error','ban','#DD6B20')
               end
             end
@@ -757,11 +2308,74 @@ local stopEnabled, debugEnabled = true, true
               return EMERGENCY_CLASSES[ GetVehicleClass(GetVehiclePedIsIn(ped,false)) ] or false
             end
 
+            local function looksLikeExternalMDTResource(name)
+              local low = tostring(name or ''):lower()
+              if low == '' then return false end
+              return low:find('az%-mdt', 1, false)
+                  or low:find('az_mdt', 1, true)
+                  or low:find('mdt%-stand', 1, false)
+                  or low:find('mdtstand', 1, true)
+            end
+
+            local function getExternalMDTResource()
+              if not (Config and Config.MDT and Config.MDT.preferExternalWhenAvailable) then return nil end
+              local names = (Config and Config.MDT and Config.MDT.externalResourceNames) or { 'Az-MDT', 'az_mdt', 'Az-Mdt-Standalone' }
+              for _, name in ipairs(names) do
+                if name and name ~= '' and name ~= GetCurrentResourceName() and type(GetResourceState) == 'function' and GetResourceState(name) == 'started' then
+                  return name
+                end
+              end
+              if type(GetNumResources) == 'function' and type(GetResourceByFindIndex) == 'function' and type(GetResourceState) == 'function' then
+                for i = 0, GetNumResources() - 1 do
+                  local name = GetResourceByFindIndex(i)
+                  if name and name ~= GetCurrentResourceName() and looksLikeExternalMDTResource(name) and GetResourceState(name) == 'started' then
+                    return name
+                  end
+                end
+              end
+              return nil
+            end
+
+            openExternalMDT = function(payload)
+              local res = getExternalMDTResource()
+              if not res then return false end
+              payload = payload or {}
+              local search = type(payload.search) == 'table' and payload.search or {}
+              payload.search = search
+              if payload.page and (not search.page or search.page == '') then search.page = payload.page end
+              if payload.kind and (not search.kind or search.kind == '') then search.kind = payload.kind end
+              if payload.value and (not search.value or search.value == '') then search.value = payload.value end
+              if payload.first and (not search.first or search.first == '') then search.first = payload.first end
+              if payload.last and (not search.last or search.last == '') then search.last = payload.last end
+              if payload.name and (not search.name or search.name == '') then search.name = payload.name end
+              if payload.plate and (not search.plate or search.plate == '') then search.plate = payload.plate end
+              if search.kind == 'name' then
+                if (not search.value or search.value == '') and ((search.first or '') ~= '' or (search.last or '') ~= '') then
+                  search.value = (tostring(search.first or '') .. ' ' .. tostring(search.last or '')):gsub('^%s+', ''):gsub('%s+$', '')
+                end
+                if (not payload.first or payload.first == '') then payload.first = search.first or '' end
+                if (not payload.last or payload.last == '') then payload.last = search.last or '' end
+                if (not payload.name or payload.name == '') then payload.name = search.name or search.value or '' end
+              elseif search.kind == 'plate' then
+                if (not search.plate or search.plate == '') and (search.value and search.value ~= '') then search.plate = search.value end
+                if (not payload.plate or payload.plate == '') then payload.plate = search.plate or search.value or '' end
+              end
+              if (not payload.kind or payload.kind == '') then payload.kind = search.kind or '' end
+              if (not payload.value or payload.value == '') then payload.value = search.value or search.plate or search.name or '' end
+              TriggerServerEvent('az_mdt:OpenExternal', payload)
+              return true
+            end
+
+            Az5PDOpenIntegratedMDT = function(payload)
+              return openExternalMDT(payload or {})
+            end
+
             local function toggleMDT()
               if not isOpen then
                 if not inEmergencyVehicle() then
                   return notify("mdt_err","MDT","Must be in emergency vehicle.",'error')
                 end
+                if openExternalMDT({}) then return end
                 isOpen = true
                 SetNuiFocus(true,true)
                 SendNUIMessage({action='open'})
@@ -821,7 +2435,7 @@ local stopEnabled, debugEnabled = true, true
 
             setPedProtected = function(netId, val)
               if not netId then return end
-              pedData[tostring(netId)] = pedData[tostring(netId)] or {}
+              ensurePerson(netId)
               pedData[tostring(netId)].pulledProtected = val and true or false
               pedData[tostring(netId)].pulledInVehicle = pedData[tostring(netId)].pulledInVehicle or false
               if not val then
@@ -843,6 +2457,7 @@ local stopEnabled, debugEnabled = true, true
             monitorKeepInVehicle = function(netId, veh, durationMs)
               if not netId or not veh then return end
               durationMs = durationMs or 30000
+              rememberDetainedVehicleState(safeNetToPed(netId), netId, veh)
               local startTime = GetGameTimer()
               Citizen.CreateThread(function()
                 local deadline = startTime + durationMs
@@ -852,11 +2467,32 @@ local stopEnabled, debugEnabled = true, true
                   local ped = safeNetToPed(netId)
                   if not DoesEntityExist(ped) then break end
 
-                  if not IsPedInAnyVehicle(ped, false) then
-                    NetworkRequestControlOfEntity(ped)
-                    ClearPedTasksImmediately(ped)
-                    holdPedAttention(ped, false)
+                  local info = pedData and pedData[tostring(netId)] or nil
+                  local allowExitUntil = info and tonumber(info.allowVehicleExitUntil) or nil
+                  local keepSeated = info and shouldKeepPedSeated(info) or false
+
+                  if not keepSeated then
+                    break
+                  end
+
+                  if allowExitUntil and GetGameTimer() < allowExitUntil then
+                    if not IsPedInAnyVehicle(ped, false) then
+                      NetworkRequestControlOfEntity(ped)
+                      ClearPedTasksImmediately(ped)
+                      holdPedAttention(ped, false)
+                    else
+                      holdPedAttention(ped, true)
+                    end
+                  elseif not IsPedInAnyVehicle(ped, false) then
+                    if enforcePedRemainSeated(ped, netId, veh) then
+                      holdPedAttention(ped, true)
+                    else
+                      NetworkRequestControlOfEntity(ped)
+                      ClearPedTasksImmediately(ped)
+                      holdPedAttention(ped, false)
+                    end
                   else
+                    rememberDetainedVehicleState(ped, netId, GetVehiclePedIsIn(ped, false))
                     holdPedAttention(ped, true)
                   end
 
@@ -868,6 +2504,14 @@ local stopEnabled, debugEnabled = true, true
             holdPedAttention = function(ped, inVehicle)
               if not ped or ped == 0 or not DoesEntityExist(ped) then return end
               local player = PlayerPedId()
+              local pedKey = tostring(safePedToNet(ped) or ped)
+              local staySeated = pedData and pedData[pedKey] and shouldKeepPedSeated(pedData[pedKey]) or false
+
+              if (not inVehicle) and staySeated then
+                if enforcePedRemainSeated(ped, pedKey) then
+                  inVehicle = true
+                end
+              end
 
               NetworkRequestControlOfEntity(ped)
               SetEntityAsMissionEntity(ped, true, true)
@@ -879,6 +2523,7 @@ local stopEnabled, debugEnabled = true, true
                 TaskLookAtEntity(ped, player, 1000000, 2048, 3)
                 TaskStandStill(ped, 1000000)
               else
+                TaskLookAtEntity(ped, player, 2500, 2048, 3)
                 SetPedKeepTask(ped, true)
               end
 
@@ -887,8 +2532,15 @@ local stopEnabled, debugEnabled = true, true
               dprint("holdPedAttention", tostring(ped), "inVehicle=", tostring(inVehicle))
             end
 
-            releasePedAttention = function(ped)
+            releasePedAttention = function(ped, force)
               if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              local pedKey = tostring(safePedToNet(ped) or ped)
+              if not force and pedData and pedData[pedKey] and pedData[pedKey].cuffed then
+                dprint("releasePedAttention: skipping because ped is cuffed", tostring(ped))
+                if holdPedAttention then holdPedAttention(ped, IsPedInAnyVehicle(ped, false)) end
+                return
+              end
+              playSimpleConversationAnim(ped, "handoff")
               NetworkRequestControlOfEntity(ped)
               ClearPedTasksImmediately(ped)
               SetBlockingOfNonTemporaryEvents(ped, false)
@@ -996,6 +2648,74 @@ local stopEnabled, debugEnabled = true, true
               return { x = x, y = y, z = z }
             end
 
+            local function getClosestVehicleNodePosHeading(x, y, z, nodeType, p6, p7)
+              local r1, r2, r3, r4 = GetClosestVehicleNodeWithHeading(x, y, z, nodeType or 1, p6 or 3.0, p7 or 0)
+
+              if type(r1) == 'boolean' then
+                if not r1 then return nil, nil, false end
+                local px, py, pz = toXYZ(r2)
+                if px and py and pz then
+                  return vector3(px, py, pz), num(r3) or 0.0, true
+                end
+                return nil, nil, false
+              end
+
+              local px, py, pz = normalizeToXYZTriple(r1, r2, r3)
+              if px and py and pz then
+                return vector3(px, py, pz), num(r4) or 0.0, true
+              end
+
+              local vx, vy, vz = toXYZ(r1)
+              if vx and vy and vz then
+                return vector3(vx, vy, vz), num(r2) or 0.0, true
+              end
+
+              return nil, nil, false
+            end
+
+
+            local function findRoadSpawnPointNear(target, minDist, maxDist)
+              local anchorCoords = nil
+              if type(target) == 'number' and target ~= 0 and DoesEntityExist(target) then
+                anchorCoords = GetEntityCoords(target)
+              else
+                local tx, ty, tz = toXYZ(target)
+                if tx and ty and tz then
+                  anchorCoords = vector3(tx, ty, tz)
+                else
+                  anchorCoords = GetEntityCoords(PlayerPedId())
+                end
+              end
+
+              minDist = tonumber(minDist) or 32.0
+              maxDist = tonumber(maxDist) or 65.0
+              if maxDist < minDist then maxDist = minDist + 10.0 end
+
+              local bestPos, bestHeading, bestScore = nil, nil, nil
+              for _ = 1, 18 do
+                local dist = minDist + (math.random() * (maxDist - minDist))
+                local ang = math.rad(math.random(0, 359))
+                local guessX = anchorCoords.x + math.cos(ang) * dist
+                local guessY = anchorCoords.y + math.sin(ang) * dist
+                local nodePos, nodeH = getClosestVehicleNodePosHeading(guessX, guessY, anchorCoords.z)
+                if nodePos then
+                  local actualDist = #(nodePos - anchorCoords)
+                  local score = math.abs(actualDist - ((minDist + maxDist) * 0.5))
+                  if not bestScore or score < bestScore then
+                    bestScore = score
+                    bestPos = nodePos
+                    bestHeading = nodeH
+                  end
+                  if actualDist >= (minDist - 6.0) and actualDist <= (maxDist + 12.0) then
+                    return nodePos, nodeH
+                  end
+                end
+              end
+
+              if bestPos then return bestPos, bestHeading end
+              return getClosestVehicleNodePosHeading(anchorCoords.x, anchorCoords.y, anchorCoords.z)
+            end
+
             local function requestModelSync(hash)
               if not HasModelLoaded(hash) then
                 RequestModel(hash)
@@ -1009,13 +2729,15 @@ local stopEnabled, debugEnabled = true, true
 
             function attemptPedAttack(ped, veh, netId)
               if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
-
               if IsPedAPlayer(ped) then return false end
 
               local attackChance = (Config and Config.Flee and Config.Flee.attackChance) or 0.5
-              if math.random() >= attackChance then
-                return false
+              if netId and pedData and pedData[tostring(netId)] then
+                local profile = pedData[tostring(netId)]
+                local boost = (((Config and Config.Immersion and Config.Immersion.traits) or {}).attackChanceBoost) or 0.15
+                if profile.wanted or profile.hasIllegalItems then attackChance = math.min(0.95, attackChance + boost) end
               end
+              if math.random() >= attackChance then return false end
 
               if NetworkGetEntityIsNetworked(ped) then
                 NetworkRequestControlOfEntity(ped)
@@ -1028,24 +2750,42 @@ local stopEnabled, debugEnabled = true, true
                 SetEntityAsMissionEntity(ped, true, true)
               end
 
+              local playerPed = PlayerPedId()
+              local dist = #(GetEntityCoords(ped) - GetEntityCoords(playerPed))
+              local engageDistance = 14.0
+              if dist > engageDistance then
+                dprint(("attemptPedAttack: cancelled, player too far (%s)"):format(tostring(dist)))
+                return false
+              end
+
               ClearPedTasksImmediately(ped)
               SetBlockingOfNonTemporaryEvents(ped, true)
               SetPedCanRagdoll(ped, false)
 
-              local playerPed = PlayerPedId()
+              local reactionDelay = 900 + math.random(0, 1800)
+              Citizen.Wait(reactionDelay)
+              if not DoesEntityExist(ped) or not DoesEntityExist(playerPed) then return false end
+              if #(GetEntityCoords(ped) - GetEntityCoords(playerPed)) > engageDistance then
+                dprint("attemptPedAttack: cancelled after delay, player moved away")
+                return false
+              end
 
               if IsPedInAnyVehicle(ped, false) then
-
-                if not HasPedGotWeapon(ped, GetHashKey("WEAPON_PISTOL"), false) then
-                  GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
+                local vehicle = GetVehiclePedIsIn(ped, false)
+                if vehicle and vehicle ~= 0 then
+                  TaskLeaveVehicle(ped, vehicle, 256)
+                  local timeout = GetGameTimer() + 2200
+                  while DoesEntityExist(ped) and IsPedInAnyVehicle(ped, false) and GetGameTimer() < timeout do
+                    Citizen.Wait(50)
+                  end
                 end
-
-                TaskShootAtEntity(ped, playerPed, 8000, 0) -- 8 seconds
-              else
-
-                GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
-                TaskCombatPed(ped, playerPed, 0, 16)
               end
+
+              if not HasPedGotWeapon(ped, GetHashKey("WEAPON_PISTOL"), false) then
+                GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 30, false, true)
+              end
+
+              TaskCombatPed(ped, playerPed, 0, 16)
 
               if netId then
                 pedData = pedData or {}
@@ -1053,7 +2793,7 @@ local stopEnabled, debugEnabled = true, true
                 pedData[tostring(netId)].attacked = true
               end
 
-              dprint(("attemptPedAttack: ped=%s attacked (netId=%s)"):format(tostring(ped), tostring(netId)))
+              dprint(("attemptPedAttack: ped=%s attacked after delay (netId=%s)"):format(tostring(ped), tostring(netId)))
               return true
             end
 
@@ -1070,13 +2810,24 @@ local stopEnabled, debugEnabled = true, true
                 return nil, nil
               end
 
-              local veh = CreateVehicle(vehHash, vx, vy, vz + 0.5, heading or 0.0, true, false)
+              local nodePos, nodeH = getClosestVehicleNodePosHeading(vx, vy, vz)
+              if nodePos then
+                vx, vy, vz = nodePos.x, nodePos.y, nodePos.z
+                if nodeH then heading = nodeH end
+              end
+              heading = tonumber(heading) or 0.0
+
+              local veh = CreateVehicle(vehHash, vx, vy, vz + 0.35, heading, true, false)
               if not veh or veh == 0 then return nil, nil end
 
               SetEntityAsMissionEntity(veh, true, true)
+              SetEntityHeading(veh, heading)
               SetVehicleOnGroundProperly(veh)
               SetVehicleEngineOn(veh, true, true, true)
+              SetVehicleHandbrake(veh, false)
               SetVehicleDoorsLocked(veh, 1)
+              SetVehicleUndriveable(veh, false)
+              SetVehicleHasBeenOwnedByPlayer(veh, false)
 
               local driver = nil
               if driverHash and requestModelSync(driverHash) then
@@ -1086,6 +2837,9 @@ local stopEnabled, debugEnabled = true, true
                   SetEntityAsMissionEntity(driver, true, true)
                   SetBlockingOfNonTemporaryEvents(driver, true)
                   SetPedKeepTask(driver, true)
+                  SetPedCanRagdoll(driver, false)
+                  if type(SetDriverAbility) == "function" then pcall(SetDriverAbility, driver, 1.0) end
+                  if type(SetDriverAggressiveness) == "function" then pcall(SetDriverAggressiveness, driver, 0.0) end
                 end
               end
 
@@ -1192,6 +2946,73 @@ local stopEnabled, debugEnabled = true, true
               end
             end
 
+            local function getEntityAnchorVectors(target)
+              if target and type(target) == 'number' and target ~= 0 and DoesEntityExist(target) then
+                local coords = GetEntityCoords(target)
+                local forward = GetEntityForwardVector(target)
+                local right = vector3(forward.y, -forward.x, 0.0)
+                return coords, forward, right, GetEntityHeading(target)
+              end
+
+              local coords = nil
+              local tx, ty, tz = toXYZ(target)
+              if tx and ty and tz then
+                coords = vector3(tx, ty, tz)
+              else
+                coords = GetEntityCoords(PlayerPedId())
+              end
+
+              local player = PlayerPedId()
+              local forward = GetEntityForwardVector(player)
+              local right = vector3(forward.y, -forward.x, 0.0)
+              return coords, forward, right, GetEntityHeading(player)
+            end
+
+            local function getSmartServiceParkPoint(target, mode)
+              local anchorCoords, forward, right, anchorHeading = getEntityAnchorVectors(target)
+              local backDist = (mode == 'tow') and 8.0 or 10.0
+              local sideDist = (mode == 'tow') and 3.2 or 4.5
+              local desired = vector3(
+                anchorCoords.x - (forward.x * backDist) + (right.x * sideDist),
+                anchorCoords.y - (forward.y * backDist) + (right.y * sideDist),
+                anchorCoords.z
+              )
+              local nodePos, nodeH = getClosestVehicleNodePosHeading(desired.x, desired.y, desired.z)
+              if nodePos then
+                return nodePos, (nodeH or anchorHeading or 0.0)
+              end
+              return desired, (anchorHeading or 0.0)
+            end
+
+            local function settleServiceVehicle(driver, veh, keepEngineOn)
+              if not veh or veh == 0 or not DoesEntityExist(veh) then return end
+              local deadline = GetGameTimer() + 5000
+              while DoesEntityExist(veh) and GetGameTimer() < deadline do
+                NetworkRequestControlOfEntity(veh)
+                if driver and driver ~= 0 and DoesEntityExist(driver) then
+                  NetworkRequestControlOfEntity(driver)
+                  if GetEntitySpeed(veh) > 0.8 then
+                    TaskVehicleTempAction(driver, veh, 27, 250)
+                  end
+                end
+                if GetEntitySpeed(veh) <= 0.8 then break end
+                Citizen.Wait(100)
+              end
+              local vcoords = GetEntityCoords(veh)
+              local nodePos, nodeH = getClosestVehicleNodePosHeading(vcoords.x, vcoords.y, vcoords.z)
+              if nodePos and #(nodePos - vcoords) <= 10.0 then
+                SetEntityCoordsNoOffset(veh, nodePos.x, nodePos.y, nodePos.z + 0.2, false, false, false)
+                if nodeH then SetEntityHeading(veh, nodeH) end
+              end
+              SetVehicleOnGroundProperly(veh)
+              SetVehicleHandbrake(veh, true)
+              SetVehicleDoorsLocked(veh, 1)
+              SetVehicleEngineOn(veh, keepEngineOn and true or false, true, true)
+              if driver and driver ~= 0 and DoesEntityExist(driver) then
+                ClearPedTasks(driver)
+              end
+            end
+
             local function createServiceBlip(veh, text)
               if not veh or veh == 0 then return nil end
               local b = AddBlipForEntity(veh)
@@ -1202,9 +3023,9 @@ local stopEnabled, debugEnabled = true, true
               return b
             end
 
-            local function cleanupServiceEntities(entities)
+            local function cleanupServiceEntities(entities, delayMs)
               Citizen.CreateThread(function()
-                Citizen.Wait(1000 * 45)
+                Citizen.Wait(tonumber(delayMs) or (1000 * 45))
                 for _, e in ipairs(entities or {}) do
                   if e and DoesEntityExist(e) then
                     SetEntityAsMissionEntity(e, true, true)
@@ -1225,28 +3046,8 @@ local stopEnabled, debugEnabled = true, true
                 return notify("ai_ems_fail","EMS","Could not determine player position.",'error','heartbeat','#DD6B20')
               end
 
-              local nx,ny,nz = px + 40.0, py + 40.0, pz
-              local nodeX, nodeY, nodeZ, nodeH = GetClosestVehicleNodeWithHeading(nx, ny, nz)
-
-              local sx, sy, sz = normalizeToXYZTriple(nodeX, nodeY, nodeZ, px+20.0, py+20.0, pz)
-              if not sx then
-                dprint("callAIEMS: invalid spawnPos", nodeX, nodeY, nodeZ, px,py,pz)
-                return notify("ai_ems_fail","EMS","Invalid spawn position.",'error','heartbeat','#DD6B20')
-              end
-              local spawnPos = { x = sx, y = sy, z = sz }
-
-              local veh, driver = spawnVehicleAndDriver("ambulance", "s_m_m_paramedic_01", spawnPos, nodeH or 0.0)
-              if not veh or not driver then return notify("ai_ems_fail","EMS","Failed to spawn EMS vehicle/driver.",'error','heartbeat','#DD6B20') end
-
-              SetVehicleSiren(veh, true)
-              local blip = createServiceBlip(veh, "AI EMS")
-              notify("ai_ems_called","AI EMS","Ambulance dispatched. ETA shortly.",'inform','heartbeat','#38A169')
-
-              local targetVec = GetEntityCoords(player)
-              driveToTarget(driver, veh, targetVec, 10.0, 6.0)
-
-              local deadPeds = getNearbyDownedPeds(targetVec, 12.0, nil)
-
+              local incidentCenter = vector3(px, py, pz)
+              local deadPeds = getNearbyDownedPeds(incidentCenter, 12.0, nil)
               if #deadPeds > 0 and type(deadPeds[1]) == 'number' then
                 local conv = {}
                 for _,ph in ipairs(deadPeds) do
@@ -1257,30 +3058,47 @@ local stopEnabled, debugEnabled = true, true
                 deadPeds = conv
               end
 
-              if #deadPeds == 0 then
-                notify("ai_ems_none","No Casualties","EMS arrived but found no dead humans nearby.",'warning','heartbeat','#DD6B20')
-              else
-                notify("ai_ems_work","EMS Arrived","EMS tending to casualties.",'success','heartbeat','#38A169')
-
+              local chosenPed = nil
+              if #deadPeds > 0 then
                 table.sort(deadPeds, function(a,b)
                   local ap = a and a.ped or a
                   local bp = b and b.ped or b
                   if not DoesEntityExist(ap) then return false end
                   if not DoesEntityExist(bp) then return true end
-                  return Vdist(GetEntityCoords(ap), targetVec) < Vdist(GetEntityCoords(bp), targetVec)
+                  return Vdist(GetEntityCoords(ap), incidentCenter) < Vdist(GetEntityCoords(bp), incidentCenter)
                 end)
                 local chosenEntry = deadPeds[1]
-                local chosenPed = nil
-                if chosenEntry then
-                  if type(chosenEntry) == 'number' then
-                    chosenPed = chosenEntry
-                  elseif type(chosenEntry) == 'table' then
-                    chosenPed = chosenEntry.ped
-                  end
+                if type(chosenEntry) == 'number' then
+                  chosenPed = chosenEntry
+                elseif type(chosenEntry) == 'table' then
+                  chosenPed = chosenEntry.ped
                 end
+              end
+
+              local parkPos, parkHeading = getSmartServiceParkPoint(chosenPed or player, 'ems')
+              local nodePos, nodeH = findRoadSpawnPointNear(parkPos or incidentCenter, 38.0, 75.0)
+              if not nodePos then
+                dprint("callAIEMS: invalid spawnPos", px, py, pz)
+                return notify("ai_ems_fail","EMS","Invalid spawn position.",'error','heartbeat','#DD6B20')
+              end
+              local spawnPos = { x = nodePos.x, y = nodePos.y, z = nodePos.z }
+
+              local veh, driver = spawnVehicleAndDriver("ambulance", "s_m_m_paramedic_01", spawnPos, nodeH or parkHeading or 0.0)
+              if not veh or not driver then return notify("ai_ems_fail","EMS","Failed to spawn EMS vehicle/driver.",'error','heartbeat','#DD6B20') end
+
+              SetVehicleSiren(veh, true)
+              local blip = createServiceBlip(veh, "AI EMS")
+              notify("ai_ems_called","AI EMS","Ambulance dispatched. ETA shortly.",'inform','heartbeat','#38A169')
+
+              driveToTarget(driver, veh, parkPos or incidentCenter, 10.0, 8.0)
+              settleServiceVehicle(driver, veh, false)
+
+              if #deadPeds == 0 then
+                notify("ai_ems_none","No Casualties","EMS arrived but found no dead humans nearby.",'warning','heartbeat','#DD6B20')
+              else
+                notify("ai_ems_work","EMS Arrived","EMS tending to casualties.",'success','heartbeat','#38A169')
 
                 if chosenPed and DoesEntityExist(chosenPed) then
-
                   NetworkRequestControlOfEntity(chosenPed)
                   SetEntityAsMissionEntity(chosenPed, true, true)
                   ClearPedTasksImmediately(chosenPed)
@@ -1292,7 +3110,6 @@ local stopEnabled, debugEnabled = true, true
                     medic = GetPedInVehicleSeat(veh, 0)
                     if medic == 0 then medic = nil end
                   end
-
                   if not DoesEntityExist(medic) then medic = respDriver end
 
                   if DoesEntityExist(respDriver) then
@@ -1311,8 +3128,7 @@ local stopEnabled, debugEnabled = true, true
                 end
               end
 
-              cleanupServiceEntities({veh, driver})
-              if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
+              cleanupServiceEntities({veh, driver}, 120000)
             end
 
             if type(forcePedExitVehicle) ~= "function" then
@@ -1617,22 +3433,12 @@ local stopEnabled, debugEnabled = true, true
                 return notify("ai_coroner_fail","Coroner","Could not determine player position.",'error','skull-crossbones','#DD6B20')
               end
 
-              math.randomseed(GetGameTimer() + GetPlayerServerId(PlayerId()))
-              local spawnDist = math.random(30, 50)
-              local spawnAng = math.rad(math.random(0, 359))
-              local sx_guess = px + math.cos(spawnAng) * spawnDist
-              local sy_guess = py + math.sin(spawnAng) * spawnDist
-              local nx, ny, nz, nodeH = GetClosestVehicleNodeWithHeading(sx_guess, sy_guess, pz)
-              local sx, sy, sz = normalizeToXYZTriple(nx, ny, nz, sx_guess, sy_guess, pz)
-              if not sx then
-                nx,ny,nz,nodeH = GetClosestVehicleNodeWithHeading(px + 50.0, py + 50.0, pz)
-                sx, sy, sz = normalizeToXYZTriple(nx, ny, nz, px+30.0, py+30.0, pz)
-              end
-              if not sx then
+              local nodePos, nodeH = findRoadSpawnPointNear(vector3(px, py, pz), 35.0, 70.0)
+              if not nodePos then
                 dprint("callAICoroner: spawn point fallback failed for AI service")
                 return notify("ai_coroner_fail","Coroner","Could not find spawn position.",'error','skull-crossbones','#DD6B20')
               end
-              local spawnPos = { x = sx, y = sy, z = sz }
+              local spawnPos = { x = nodePos.x, y = nodePos.y, z = nodePos.z }
 
               local veh, driver = spawnVehicleAndDriver("rumpo", "s_m_m_doctor_01", spawnPos, nodeH or 0.0)
               if not veh or not driver then
@@ -1653,8 +3459,7 @@ local stopEnabled, debugEnabled = true, true
               end
 
               if DoesEntityExist(driver) and DoesEntityExist(veh) and IsPedInAnyVehicle(driver, false) then
-                safeForceExit(driver, veh)
-                if type(dprint) == "function" then dprint((" [AI DEBUG] callAICoroner: driver in vehicle after force? %s"):format(tostring(IsPedInAnyVehicle(driver, false)))) end
+                if type(dprint) == "function" then dprint(" [AI DEBUG] callAICoroner: keeping driver staged in vehicle until body is selected") end
               end
 
               local center = vector3(px, py, pz)
@@ -1693,6 +3498,13 @@ local stopEnabled, debugEnabled = true, true
                 return
               end
 
+              local coronerParkPos = getSmartServiceParkPoint(chosenPed, 'coroner')
+              driveToTarget(driver, veh, coronerParkPos, 8.0, 8.0)
+              settleServiceVehicle(driver, veh, false)
+              if DoesEntityExist(driver) and DoesEntityExist(veh) and IsPedInAnyVehicle(driver, false) then
+                safeForceExit(driver, veh)
+              end
+
               safeRequestControl(chosenPed, 1000)
               SetEntityAsMissionEntity(chosenPed, true, true)
               ClearPedTasksImmediately(chosenPed)
@@ -1717,7 +3529,7 @@ local stopEnabled, debugEnabled = true, true
                 end)
               end
 
-              cleanupServiceEntities({veh, driver})
+              cleanupServiceEntities({veh, driver}, 120000)
               if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
             end
 
@@ -1741,31 +3553,114 @@ local stopEnabled, debugEnabled = true, true
                   end
                   return NetworkHasControlOfEntity(ent)
                 else
-
                   SetEntityAsMissionEntity(ent, true, true)
                   return true
                 end
               end
 
+              local pedKey = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or safePedToNet(ped) or ped)
+              pedData = pedData or {}
+              pedData[pedKey] = pedData[pedKey] or {}
+              local info = pedData[pedKey]
+              info.fled = true
+              local wasStoppedInVehicle = info.pulledInVehicle or info.pulledProtected or info.forcedStop
+              info.forcedStop = nil
+              info.pulledProtected = false
+              info.pulledInVehicle = false
+              info.detainedVehicleNet = nil
+              info.detainedSeat = nil
+              info.preventVehicleReseatUntil = GetGameTimer() + 15000
+              setPedProtected(pedKey, false)
+              markPulledInVehicle(pedKey, false)
+              releasePedAttention(ped, true)
+
+              local function startFleeBlip(entity, isVehicle)
+                if pullVehBlip and DoesBlipExist(pullVehBlip) then
+                  RemoveBlip(pullVehBlip)
+                  pullVehBlip = nil
+                end
+                if not entity or entity == 0 or not DoesEntityExist(entity) then return end
+                pullVehBlip = AddBlipForEntity(entity)
+                if not pullVehBlip or not DoesBlipExist(pullVehBlip) then return end
+                SetBlipSprite(pullVehBlip, isVehicle and 225 or 280)
+                SetBlipScale(pullVehBlip, isVehicle and 1.0 or 0.95)
+                SetBlipAsShortRange(pullVehBlip, false)
+                SetBlipColour(pullVehBlip, 1)
+                BeginTextCommandSetBlipName("STRING")
+                AddTextComponentString(isVehicle and "Fleeing Vehicle" or "Fleeing Suspect")
+                EndTextCommandSetBlipName(pullVehBlip)
+                Citizen.CreateThread(function()
+                  local startTime = GetGameTimer()
+                  local maxDuration = 60000
+                  while pullVehBlip and DoesBlipExist(pullVehBlip) and GetGameTimer() - startTime <= maxDuration do
+                    Citizen.Wait(1000)
+                    if not DoesEntityExist(entity) then break end
+                    local pcoords = GetEntityCoords(PlayerPedId())
+                    local ecoords = GetEntityCoords(entity)
+                    if #(pcoords - ecoords) > 650.0 then break end
+                  end
+                  if pullVehBlip and DoesBlipExist(pullVehBlip) then
+                    RemoveBlip(pullVehBlip)
+                    pullVehBlip = nil
+                  end
+                end)
+              end
+
+              local function startFootFleeNow()
+                dprint(("startFleeDrive: ped %s fleeing on foot"):format(tostring(ped)))
+                requestControl(ped, 800)
+                StopAnimTask(ped, "mp_arresting", "idle", 1.0)
+                ClearPedTasksImmediately(ped)
+                SetBlockingOfNonTemporaryEvents(ped, true)
+                SetPedFleeAttributes(ped, 2, true)
+                SetPedCanRagdoll(ped, true)
+                SetPedKeepTask(ped, true)
+                TaskSmartFleePed(ped, playerPed, 250.0, -1, false, false)
+                startFleeBlip(ped, false)
+                notify("suspect_flee_foot", "Suspect Running", "Suspect bailed out and is fleeing on foot. Blip placed on suspect.", 'error', 'person-running', '#E53E3E')
+                return true
+              end
+
               if veh and veh ~= 0 and DoesEntityExist(veh) and IsPedInAnyVehicle(ped, false) then
-                dprint(("startFleeDrive: ped %s in vehicle %s - attempting drive away"):format(tostring(ped), tostring(veh)))
+                dprint(("startFleeDrive: ped %s in vehicle %s"):format(tostring(ped), tostring(veh)))
 
                 requestControl(veh, 1200)
                 requestControl(ped, 800)
 
+                if GetPedInVehicleSeat(veh, -1) ~= ped then
+                  dprint("startFleeDrive: ped is not the driver; refusing to assign drive-away task")
+                  return false
+                end
+
+                if wasStoppedInVehicle then
+                  ClearPedTasksImmediately(ped)
+                  ClearPedSecondaryTask(ped)
+                  SetVehicleEngineOn(veh, true, true, true)
+                  SetVehicleUndriveable(veh, false)
+                  SetVehicleHandbrake(veh, false)
+                  SetVehicleDoorsLocked(veh, 1)
+                  SetVehicleForwardSpeed(veh, 12.0)
+                end
+
                 SetVehicleEngineOn(veh, true, true, true)
                 SetVehicleUndriveable(veh, false)
-
-                ClearPedTasksImmediately(ped)
+                SetVehicleHandbrake(veh, false)
+                SetVehicleDoorsLocked(veh, 1)
+                SetVehicleForwardSpeed(veh, 18.0)
                 SetBlockingOfNonTemporaryEvents(ped, true)
                 SetPedKeepTask(ped, true)
+                SetPedCanBeDraggedOut(ped, false)
+                SetPedCanRagdoll(ped, false)
+                if type(SetDriverAbility) == "function" then pcall(SetDriverAbility, ped, 1.0) end
+                if type(SetDriverAggressiveness) == "function" then pcall(SetDriverAggressiveness, ped, 1.0) end
+                if type(SetDriveTaskDrivingStyle) == "function" then pcall(SetDriveTaskDrivingStyle, ped, 786603) end
+                if type(SetDriveTaskCruiseSpeed) == "function" then pcall(SetDriveTaskCruiseSpeed, ped, 60.0) end
 
                 local pedCoords = GetEntityCoords(ped)
                 local plCoords = GetEntityCoords(playerPed)
                 local dir = vector3(pedCoords.x - plCoords.x, pedCoords.y - plCoords.y, 0.0)
                 local dlen = math.sqrt(dir.x * dir.x + dir.y * dir.y)
                 if dlen < 1.0 then
-
                   local heading = GetEntityHeading(ped)
                   local hr = math.rad(heading)
                   dir = vector3(-math.sin(hr), math.cos(hr), 0.0)
@@ -1773,50 +3668,31 @@ local stopEnabled, debugEnabled = true, true
                 end
                 dir = vector3(dir.x / dlen, dir.y / dlen, 0.0)
 
-                local fleeDist = 200.0
+                local fleeDist = 320.0
                 local tx = pedCoords.x + dir.x * fleeDist
                 local ty = pedCoords.y + dir.y * fleeDist
                 local tz = pedCoords.z + 1.0
 
-                local speed = 45.0   -- target cruising speed (tweak as desired)
-                local driveStyle = 786603 -- driving style flags (best-effort; tweak if you want calmer/aggressive)
-
                 if type(TaskVehicleDriveToCoordLongrange) == "function" then
-                  TaskVehicleDriveToCoordLongrange(ped, veh, tx, ty, tz, speed, driveStyle, 1.0)
+                  TaskVehicleDriveToCoordLongrange(ped, veh, tx, ty, tz, 60.0, 786603, 8.0)
                 else
-                  TaskVehicleDriveToCoord(ped, veh, tx, ty, tz, speed, 1.0, driveStyle, 5.0, true)
+                  TaskVehicleDriveToCoord(ped, veh, tx, ty, tz, 60.0, 1.0, 786603, 5.0, true)
                 end
+                Citizen.CreateThread(function()
+                  Citizen.Wait(1500)
+                  if DoesEntityExist(ped) and DoesEntityExist(veh) and GetPedInVehicleSeat(veh, -1) == ped then
+                    TaskVehicleDriveWander(ped, veh, 60.0, 786603)
+                  end
+                end)
 
-                pedData = pedData or {}
-                local nid = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or ped)
-                pedData[nid] = pedData[nid] or {}
-                pedData[nid].fled = true
-
+                startFleeBlip(veh, true)
+                notify("pull_fail_blip", "Traffic Stop Failed", "Suspect is gunning it. Blip placed on vehicle.", 'error', 'car', '#E53E3E')
                 dprint(("startFleeDrive: started vehicle flee for ped=%s -> target(%.1f,%.1f,%.1f)"):format(tostring(ped), tx, ty, tz))
                 return true
               end
 
               if not IsPedInAnyVehicle(ped, false) then
-                dprint(("startFleeDrive: ped %s fleeing on foot"):format(tostring(ped)))
-
-                requestControl(ped, 800)
-
-                ClearPedTasksImmediately(ped)
-                SetBlockingOfNonTemporaryEvents(ped, true)
-                SetPedFleeAttributes(ped, 2, true) -- keep fleeing
-                SetPedCanRagdoll(ped, true)
-                SetPedKeepTask(ped, true)
-
-                local fleeDistance = 200.0
-                TaskSmartFleePed(ped, playerPed, fleeDistance, -1, false, false)
-
-                pedData = pedData or {}
-                local nid = tostring(NetworkGetNetworkIdFromEntity and NetworkGetNetworkIdFromEntity(ped) or ped)
-                pedData[nid] = pedData[nid] or {}
-                pedData[nid].fled = true
-
-                dprint(("startFleeDrive: started on-foot flee for ped=%s"):format(tostring(ped)))
-                return true
+                return startFootFleeNow()
               end
 
               dprint("startFleeDrive: no action taken (ped not in vehicle and not valid)")
@@ -1830,13 +3706,12 @@ local stopEnabled, debugEnabled = true, true
                 return notify("ai_tow_fail","Tow","Could not determine player position.",'error','truck','#DD6B20')
               end
 
-              local nx,ny,nz,nodeH = GetClosestVehicleNodeWithHeading(px - 50.0, py + 10.0, pz)
-              local sx, sy, sz = normalizeToXYZTriple(nx, ny, nz, px-30.0, py+10.0, pz)
-              if not sx then
-                dprint("callTow: invalid spawnPos", nx,ny,nz,px,py,pz)
+              local nodePos, nodeH = findRoadSpawnPointNear(vector3(px, py, pz), 40.0, 80.0)
+              if not nodePos then
+                dprint("callTow: invalid spawnPos", px, py, pz)
                 return notify("ai_tow_fail","Tow","Invalid spawn position.",'error','truck','#DD6B20')
               end
-              local spawnPos = { x = sx, y = sy, z = sz }
+              local spawnPos = { x = nodePos.x, y = nodePos.y, z = nodePos.z }
 
               local towVeh, driver = spawnVehicleAndDriver("flatbed", "s_m_m_trucker_01", spawnPos, nodeH or 0.0)
               if not towVeh or not driver then return notify("ai_tow_fail","Tow","Failed to spawn tow truck.",'error','truck','#DD6B20') end
@@ -1848,7 +3723,7 @@ local stopEnabled, debugEnabled = true, true
               if not targetVeh or targetVeh == 0 then
                 driveToTarget(driver, towVeh, GetEntityCoords(player), 10.0, 6.0)
                 notify("ai_tow_none","No Vehicle","No suitable vehicle nearby to tow.",'warning','truck','#DD6B20')
-                cleanupServiceEntities({towVeh, driver})
+                cleanupServiceEntities({towVeh, driver}, 90000)
                 if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
                 return
               end
@@ -1857,12 +3732,13 @@ local stopEnabled, debugEnabled = true, true
               if not targetPosX then
                 dprint("callTow: invalid targetPos for towing", tostring(targetVeh))
                 notify("ai_tow_miss","No Target","Vehicle disappeared before tow arrived.",'warning','truck','#DD6B20')
-                cleanupServiceEntities({towVeh, driver})
+                cleanupServiceEntities({towVeh, driver}, 90000)
                 if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
                 return
               end
               local targetPos = vector3(targetPosX, targetPosY, targetPosZ)
-              driveToTarget(driver, towVeh, targetPos, 10.0, 4.0)
+              local towParkPos = getSmartServiceParkPoint(targetVeh, 'tow')
+              driveToTarget(driver, towVeh, towParkPos or targetPos, 10.0, 6.0)
 
               if DoesEntityExist(targetVeh) then
                 NetworkRequestControlOfEntity(targetVeh)
@@ -1887,11 +3763,11 @@ local stopEnabled, debugEnabled = true, true
                 notify("ai_tow_miss","No Target","Vehicle disappeared before tow arrived.",'warning','truck','#DD6B20')
               end
 
-              cleanupServiceEntities({towVeh, driver})
+              cleanupServiceEntities({towVeh, driver}, 90000)
               if blip and DoesBlipExist(blip) then RemoveBlip(blip) end
             end
 
-            local function getPrimaryOccupant(veh)
+            getPrimaryOccupant = function(veh)
               if not veh or not DoesEntityExist(veh) then return nil end
               local driver = GetPedInVehicleSeat(veh, -1)
               if driver and driver ~= 0 and not IsPedAPlayer(driver) then return driver end
@@ -1902,7 +3778,105 @@ local stopEnabled, debugEnabled = true, true
               return nil
             end
 
-            function attemptPullOverAI(forceImmediate)
+            local function findTrafficStopDestination(veh)
+              if not veh or veh == 0 or not DoesEntityExist(veh) then return nil, nil end
+
+              local function normalizeHeading(h)
+                h = num(h) or 0.0
+                h = h % 360.0
+                if h < 0.0 then h = h + 360.0 end
+                return h
+              end
+
+              local function headingDelta(a, b)
+                a = normalizeHeading(a)
+                b = normalizeHeading(b)
+                return ((b - a + 540.0) % 360.0) - 180.0
+              end
+
+              local function headingAlignedWithTravel(baseHeading, candidateHeading)
+                local cand = normalizeHeading(candidateHeading or baseHeading or 0.0)
+                if math.abs(headingDelta(baseHeading or 0.0, cand)) > 90.0 then
+                  cand = normalizeHeading(cand + 180.0)
+                end
+                return cand
+              end
+
+              local vehCoords = GetEntityCoords(veh)
+              local vehFwd = GetEntityForwardVector(veh)
+              local fwdLen = math.sqrt((vehFwd.x * vehFwd.x) + (vehFwd.y * vehFwd.y))
+              if fwdLen <= 0.001 then
+                return vehCoords, GetEntityHeading(veh)
+              end
+
+              vehFwd = vector3(vehFwd.x / fwdLen, vehFwd.y / fwdLen, 0.0)
+
+              -- GTA right-hand shoulder relative to travel direction.
+              -- For a forward vector (x, y), the true right vector is (y, -x).
+              -- The previous sign order pointed to the left shoulder, which caused AI cars
+              -- to pull across/onto the wrong side of the road.
+              local vehRight = vector3(vehFwd.y, -vehFwd.x, 0.0)
+              local currentHeading = GetEntityHeading(veh)
+              local bestPos, bestHeading, bestScore = nil, nil, nil
+
+              for _, ahead in ipairs({12.0, 18.0, 24.0, 30.0}) do
+                for _, side in ipairs({3.5, 5.0, 6.5}) do
+                  local desired = vector3(
+                    vehCoords.x + (vehFwd.x * ahead) + (vehRight.x * side),
+                    vehCoords.y + (vehFwd.y * ahead) + (vehRight.y * side),
+                    vehCoords.z
+                  )
+
+                  local nodePos, nodeH, nodeOk = getClosestVehicleNodePosHeading(desired.x, desired.y, desired.z)
+                  local cand = (nodeOk and nodePos) or desired
+                  local candHeading = headingAlignedWithTravel(currentHeading, nodeH or currentHeading)
+                  local toCandX = cand.x - vehCoords.x
+                  local toCandY = cand.y - vehCoords.y
+                  local aheadDot = (toCandX * vehFwd.x) + (toCandY * vehFwd.y)
+                  local rightDot = (toCandX * vehRight.x) + (toCandY * vehRight.y)
+
+                  if aheadDot > 10.0 and rightDot > 1.5 then
+                    local offsetDist = #(cand - desired)
+                    local sidePenalty = math.abs(rightDot - side) * 0.35
+                    local headingPenalty = math.abs(headingDelta(currentHeading, candHeading)) * 0.05
+                    local score = offsetDist + sidePenalty + headingPenalty
+
+                    if not bestScore or score < bestScore then
+                      bestScore = score
+                      bestPos = cand
+                      bestHeading = candHeading
+                    end
+                  end
+                end
+              end
+
+              if bestPos then return bestPos, bestHeading end
+
+              local fallback = vector3(
+                vehCoords.x + (vehFwd.x * 16.0) + (vehRight.x * 4.5),
+                vehCoords.y + (vehFwd.y * 16.0) + (vehRight.y * 4.5),
+                vehCoords.z
+              )
+              return fallback, currentHeading
+            end
+
+            local pendingPullState = 'idle'
+
+            local function isPullOverSignalActive(vehicle)
+              if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then return false end
+
+              local sirenOn = false
+              pcall(function() sirenOn = IsVehicleSirenOn(vehicle) and true or false end)
+              if sirenOn then return true end
+
+              local sirenAudioOn = false
+              pcall(function() sirenAudioOn = IsVehicleSirenAudioOn(vehicle) and true or false end)
+              if sirenAudioOn then return true end
+
+              return false
+            end
+
+            function attemptPullOverAI(forceImmediate, markedVehicle)
               dprint("attemptPullOverAI called, forceImmediate=", tostring(forceImmediate))
               if not inEmergencyVehicle() then
                 return notify("pull_err","Pull-Over","Must be in an emergency vehicle to initiate pull-over.",'error')
@@ -1914,37 +3888,51 @@ local stopEnabled, debugEnabled = true, true
                 return notify("pull_err","Pull-Over","You must be in your vehicle to request a pull-over.",'error')
               end
 
-              local best = findVehicleAhead(20, 0.5)
+              local best = nil
+              if markedVehicle and markedVehicle ~= 0 and DoesEntityExist(markedVehicle) then
+                best = markedVehicle
+              else
+                best = findVehicleAhead(20, 0.5)
+              end
               if not best then
                 return notify("pull_err","Pull-Over","No vehicle ahead.",'error')
               end
 
               pullVeh = best
+              pendingPullVeh = nil
+              pendingPullDeadline = 0
               dprint("attemptPullOverAI: pullVeh set to", tostring(pullVeh))
 
               if not forceImmediate then
-                notify("pull_info","PULL-OVER","TURN ON EMERGENCY LIGHTS TO PULL VEHICLE OVER",'inform','car','')
+                pendingPullState = 'waiting_for_emergency_signal'
+                notify("pull_wait_signal","Traffic Stop","Target marked. Waiting for police lights / sirens before the stop begins.",'inform','siren-on','#4299E1')
               else
+                pendingPullState = 'forced'
                 notify("pull_info_force","PULL-OVER (FORCED)","Forcing pull-over (no lights required).",'inform','car','')
               end
 
-              local waitDeadline = GetGameTimer() + 8000
-              while GetGameTimer() < waitDeadline and not forceImmediate and not IsVehicleSirenOn(myVeh) do
+              local waitDeadline = GetGameTimer() + 4500
+              while GetGameTimer() < waitDeadline and not forceImmediate and not isPullOverSignalActive(myVeh) do
                 Citizen.Wait(100)
               end
-              if not forceImmediate and not IsVehicleSirenOn(myVeh) then
-                notify("pull_err","Pull-Over","Timed out waiting for lights/siren.",'error')
+              if not forceImmediate and not isPullOverSignalActive(myVeh) then
+                pendingPullState = 'idle'
+                notify("pull_err","Traffic Stop","Police lights / sirens are still off. Turn them on to begin the stop.",'warning')
                 pullVeh = nil
                 return
               end
 
+              pendingPullState = 'initiating_stop'
+
             do
               local driver = GetPedInVehicleSeat(pullVeh, -1)
               local netId = driver and driver ~= 0 and (safePedToNet(driver) or tostring(driver)) or nil
-              local fleeChance = (Config and Config.Flee and Config.Flee.baseFleeChance) or 0.2
-              if netId and pedData and pedData[tostring(netId)] then
-                if pedData[tostring(netId)].wanted then fleeChance = math.max(fleeChance, (Config.Flee and Config.Flee.warrantFleeChance) or 0.6) end
-                if pedData[tostring(netId)].suspended then fleeChance = math.max(fleeChance, (Config.Flee and Config.Flee.suspendedFleeChance) or 0.5) end
+              local fleeChance = 0.0
+              if netId then
+                pedData = pedData or {}
+                pedData[tostring(netId)] = pedData[tostring(netId)] or {}
+                pedData[tostring(netId)].stopAwaitingId = true
+                pedData[tostring(netId)].idChecked = pedData[tostring(netId)].idChecked and true or false
               end
               if math.random() < fleeChance then
                 if driver and driver ~= 0 then
@@ -2027,7 +4015,7 @@ local stopEnabled, debugEnabled = true, true
               if driver and driver ~= 0 and not IsPedAPlayer(driver) then
                 local netId = safePedToNet(driver) or tostring(driver)
                 if not pedData[tostring(netId)] then
-                  pedData[tostring(netId)] = generatePerson()
+                  pedData[tostring(netId)] = generatePerson(driver)
                   TriggerServerEvent('mdt:logID', tostring(netId), pedData[tostring(netId)])
                 end
                 lastPedNetId = tostring(netId)
@@ -2036,44 +4024,85 @@ local stopEnabled, debugEnabled = true, true
                 setPedProtected(netId, true)
                 pedData[tostring(netId)].forcedStop = forceImmediate and true or false
                 markPulledInVehicle(netId, true)
+                rememberDetainedVehicleState(driver, netId, pullVeh)
 
                 SetEntityAsMissionEntity(driver, true, true)
                 SetBlockingOfNonTemporaryEvents(driver, true)
                 monitorKeepInVehicle(netId, pullVeh, 30000)
               end
 
-              local vehCoords = GetEntityCoords(pullVeh)
-              local vehFwd = GetEntityForwardVector(pullVeh)
-              local vehRight = vector3(vehFwd.y, -vehFwd.x, 0)
-              local targetPos = vehCoords + vehFwd * 3.0 + vehRight * 1.5
+              local targetPos, stopHeading = findTrafficStopDestination(pullVeh)
               local tx, ty, tz = targetPos.x, targetPos.y, targetPos.z
 
               if driver and driver ~= 0 and not IsPedAPlayer(driver) then
-                local slowSpeed = 3.0
-                TaskVehicleDriveToCoordLongrange(driver, pullVeh, tx, ty, tz, slowSpeed, 786603, 3.0)
-                notify("pull_slow","Pull-Over","Vehicle slowing down to pull over...",'inform','car-side','#4299E1')
+                local currentSpeed = GetEntitySpeed(pullVeh)
+                local firstStageSpeed = math.max(8.0, math.min(15.0, math.max(currentSpeed * 0.72, 9.0)))
+                local secondStageSpeed = math.max(4.5, math.min(8.5, math.max(currentSpeed * 0.42, 5.5)))
+                SetDriverAbility(driver, 0.8)
+                SetDriverAggressiveness(driver, 0.0)
+                if currentSpeed > 10.0 then
+                  TaskVehicleTempAction(driver, pullVeh, 19, 1200)
+                  Citizen.Wait(300)
+                elseif currentSpeed > 6.0 then
+                  TaskVehicleTempAction(driver, pullVeh, 27, 900)
+                  Citizen.Wait(200)
+                end
+                TaskVehicleDriveToCoordLongrange(driver, pullVeh, tx, ty, tz, firstStageSpeed, 786603, 16.0)
+                if type(SetDriveTaskCruiseSpeed) == 'function' then pcall(SetDriveTaskCruiseSpeed, driver, firstStageSpeed) end
+                notify("pull_slow","Traffic Stop","Vehicle acknowledged your stop, is slowing down gradually, and is starting to pull to the right.",'inform','car-side','#4299E1')
+
+                Citizen.CreateThread(function()
+                  local stageDeadline = GetGameTimer() + 2200
+                  while GetGameTimer() < stageDeadline do
+                    if not DoesEntityExist(pullVeh) or not DoesEntityExist(driver) then break end
+                    local dist = #(GetEntityCoords(pullVeh) - vector3(tx,ty,tz))
+                    if dist < 20.0 then break end
+                    if type(SetDriveTaskCruiseSpeed) == 'function' then pcall(SetDriveTaskCruiseSpeed, driver, firstStageSpeed) end
+                    Citizen.Wait(200)
+                  end
+                  if DoesEntityExist(pullVeh) and DoesEntityExist(driver) then
+                    TaskVehicleDriveToCoordLongrange(driver, pullVeh, tx, ty, tz, secondStageSpeed, 786603, 10.0)
+                    if type(SetDriveTaskCruiseSpeed) == 'function' then pcall(SetDriveTaskCruiseSpeed, driver, secondStageSpeed) end
+                  end
+                end)
 
                 Citizen.CreateThread(function()
                   local done = false
-                  local monitorDeadline = GetGameTimer() + 8000
+                  local monitorDeadline = GetGameTimer() + 9000
                   while not done and GetGameTimer() < monitorDeadline do
                     if not DoesEntityExist(pullVeh) then done = true break end
                     local curPos = GetEntityCoords(pullVeh)
                     local dist = #(curPos - vector3(tx,ty,tz))
                     local speed = GetEntitySpeed(pullVeh)
-                    if dist < 2.0 or speed < 0.6 then
+
+                    if driver and driver ~= 0 and DoesEntityExist(driver) and not IsPedAPlayer(driver) then
+                      if dist < 14.0 then
+                        TaskVehicleDriveToCoordLongrange(driver, pullVeh, tx, ty, tz, 6.0, 786603, 6.0)
+                      end
+                      if dist < 7.0 then
+                        TaskVehicleTempAction(driver, pullVeh, 27, 600)
+                      end
+                      if dist < 3.5 then
+                        TaskVehicleTempAction(driver, pullVeh, 27, 1200)
+                      end
+                    end
+
+                    if dist < 3.5 or (dist < 6.0 and speed < 2.0) then
                       done = true
                       break
                     end
-                    Citizen.Wait(150)
+                    Citizen.Wait(200)
                   end
 
                   if not DoesEntityExist(pullVeh) then
+                    pendingPullState = 'idle'
                     pullVeh = nil
                     return
                   end
 
+                  pendingPullState = 'stopped'
                   SetVehicleOnGroundProperly(pullVeh)
+                  -- Keep the vehicle's natural final heading. Forcing stopHeading here can snap/rotate the AI vehicle on stop.
                   SetVehicleForwardSpeed(pullVeh, 0.0)
                   SetVehicleEngineOn(pullVeh, false, true, true)
                   SetVehicleHandbrake(pullVeh, true)
@@ -2088,7 +4117,7 @@ local stopEnabled, debugEnabled = true, true
                   if occupant and occupant ~= 0 then
                     local occNet = safePedToNet(occupant) or tostring(occupant)
                     if not pedData[occNet] then
-                      pedData[occNet] = generatePerson()
+                      pedData[occNet] = generatePerson(occupant)
                       TriggerServerEvent('mdt:logID', occNet, pedData[occNet])
                     end
                     lastPedNetId = occNet
@@ -2097,6 +4126,7 @@ local stopEnabled, debugEnabled = true, true
                     setPedProtected(occNet, true)
                     pedData[occNet].forcedStop = forceImmediate and true or false
                     markPulledInVehicle(occNet, true)
+                    rememberDetainedVehicleState(occupant, occNet, pullVeh)
 
                     NetworkRequestControlOfEntity(occupant)
                     SetEntityAsMissionEntity(occupant, true, true)
@@ -2112,7 +4142,7 @@ local stopEnabled, debugEnabled = true, true
                   notify(
                     "pull_done",
                     "Pull-Over",
-                    "Vehicle slowed and pulled over. Occupant detained in-vehicle. Press [Y] to reposition. Use vehicle menu to eject if needed.",
+                    "Vehicle yielded, slowed to the shoulder, and stopped. Occupant detained in-vehicle. Press [Y] to reposition. Use vehicle menu to eject if needed.",
                     'success',
                     'car-side',
                     '#38A169',
@@ -2379,25 +4409,50 @@ local stopEnabled, debugEnabled = true, true
               end
 
               local netId = safePedToNet(ped)
-              if netId and pedData[tostring(netId)] and (pedData[tostring(netId)].pulledProtected or pedData[tostring(netId)].pulledInVehicle) then
+              local key = netId and tostring(netId) or tostring(ped)
+              local isCuffed = isPedActuallyCuffed(ped, key)
+              if not isCuffed and netId and pedData[tostring(netId)] and (pedData[tostring(netId)].pulledProtected or pedData[tostring(netId)].pulledInVehicle) then
                 notify("protected","Protected","This ped is protected while pulled. Use vehicle eject option to forcibly remove them.", 'warning','ban','#DD6B20')
                 return false
               end
 
+              if pedData[key] then
+                local now = GetGameTimer()
+                pedData[key].allowVehicleExitUntil = now + 7000
+                pedData[key].preventVehicleReseatUntil = now + 15000
+                pedData[key].detainedVehicleNet = nil
+                pedData[key].detainedSeat = nil
+                pedData[key].pulledProtected = false
+                pedData[key].pulledInVehicle = false
+                pedData[key].forcedStop = nil
+              end
+
               NetworkRequestControlOfEntity(ped)
-              NetworkRequestControlOfEntity(veh)
+              if veh and veh ~= 0 and DoesEntityExist(veh) then NetworkRequestControlOfEntity(veh) end
 
               ClearPedTasksImmediately(ped)
-              TaskLeaveVehicle(ped, veh, 0)
+              TaskLeaveVehicle(ped, veh, 16)
               SetBlockingOfNonTemporaryEvents(ped, false)
 
               Citizen.CreateThread(function()
-                local deadline = GetGameTimer() + 3000
+                local deadline = GetGameTimer() + 3500
                 while GetGameTimer() < deadline do
                   if not IsPedInAnyVehicle(ped, false) then
                     ClearPedTasksImmediately(ped)
-                    holdPedAttention(ped, false)
-                    SetPedAsNoLongerNeeded(ped)
+                    if isCuffed then
+                      applyCuffedPedState(ped, netId, true)
+                      holdPedAttention(ped, false)
+                      TaskStandStill(ped, 2500)
+                    else
+                      holdPedAttention(ped, false)
+                      SetPedAsNoLongerNeeded(ped)
+                    end
+                    if veh and veh ~= 0 and DoesEntityExist(veh) then
+                      NetworkRequestControlOfEntity(veh)
+                      SetVehicleHandbrake(veh, true)
+                      SetVehicleEngineOn(veh, false, true, true)
+                      SetVehicleDoorsLocked(veh, 2)
+                    end
                     break
                   end
                   Citizen.Wait(Config.Timings.shortWait)
@@ -2609,7 +4664,16 @@ local stopEnabled, debugEnabled = true, true
               end
             end
 
-            if lib and lib.registerContext then
+            local policeActionMenusRegistered = false
+
+            local function registerPoliceActionMenus(force)
+              if type(lib) ~= "table" or type(lib.registerContext) ~= "function" then
+                return false, "ox_lib context unavailable"
+              end
+              if policeActionMenusRegistered and not force then
+                return true
+              end
+
               lib.registerContext({
                 id='police_mainai',
                 title='**Police Actions**',
@@ -2618,6 +4682,7 @@ local stopEnabled, debugEnabled = true, true
                   { title='MDT (Records & Plate)', icon='search', arrow=true, onSelect=function() lib.showContext('police_mdt') end },
                   { title='AI Services', icon='heartbeat', arrow=true, onSelect=function() lib.showContext('police_ai') end },
                   { title='Ped Interaction', icon='user', arrow=true, onSelect=function() lib.showContext('police_ped') end },
+                  { title='Simulation / Scene Tools', icon='clipboard-list', description='Open the integrated scene panel', onSelect=function() if openExternalMDT({ page = 'simTools' }) then TriggerServerEvent('az5pd:sim:requestState') return end TriggerEvent('az5pd:sim:openMenu') end },
                   { title='Vehicle Interaction', icon='car-side', arrow=true, onSelect=function() lib.showContext('vehicle_interact') end },
                   { title='Pull-Over AI', icon='car', onSelect=function() attemptPullOverAI(false) end },
                 }
@@ -2634,9 +4699,9 @@ local stopEnabled, debugEnabled = true, true
                       if lastPedNetId then showIDSafely(lastPedNetId)
                       else notify("id_err","ID","No ped stopped.",'error') end
                     end },
-                  { title='Reports', icon='file-alt', onSelect=function() SendNUIMessage({ action='openSection', section='reports' }); if not isOpen then isOpen=true; SetNuiFocus(true,true); SendNUIMessage({action='open'}) end end },
-                  { title='Warrants', icon='gavel', onSelect=function() SendNUIMessage({ action='openSection', section='warrants' }); if not isOpen then isOpen=true; SetNuiFocus(true,true); SendNUIMessage({action='open'}) end end },
-                  { title='Dispatch', icon='broadcast-tower', onSelect=function() SendNUIMessage({ action='openSection', section='dispatch' }); if not isOpen then isOpen=true; SetNuiFocus(true,true); SendNUIMessage({action='open'}) end end },
+                  { title='Reports', icon='file-alt', onSelect=function() if openExternalMDT({ page = 'reports' }) then return end SendNUIMessage({ action='openSection', section='reports' }); if not isOpen then isOpen=true; SetNuiFocus(true,true); SendNUIMessage({action='open'}) end end },
+                  { title='Warrants', icon='gavel', onSelect=function() if openExternalMDT({ page = 'warrants' }) then return end SendNUIMessage({ action='openSection', section='warrants' }); if not isOpen then isOpen=true; SetNuiFocus(true,true); SendNUIMessage({action='open'}) end end },
+                  { title='Dispatch', icon='broadcast-tower', onSelect=function() if openExternalMDT({ page = 'callsHub' }) then return end SendNUIMessage({ action='openSection', section='dispatch' }); if not isOpen then isOpen=true; SetNuiFocus(true,true); SendNUIMessage({action='open'}) end end },
                 }
               })
 
@@ -2661,7 +4726,12 @@ local stopEnabled, debugEnabled = true, true
                 options={
                   { title='Check ID', icon='id-card', onSelect=function() dprint("Context: Check ID selected"); showIDSafely(lastPedNetId) end },
                   { title='Search Ped', icon='magnifying-glass', onSelect=function() dprint("Context: Search Ped selected"); doSearch() end },
+                  { title='Ask Questions', icon='comments', arrow=true, onSelect=function() lib.showContext('police_questions') end },
+                  { title='Follow Me', icon='person-walking', onSelect=function() setPedFollowState(true) end },
+                  { title='Stop Follow', icon='hand', onSelect=function() setPedFollowState(false) end },
+                  { title='Tell Ped Get In Car', icon='car-side', onSelect=function() tellPedEnterVehicle() end },
                   { title='Issue Citation', icon='ticket-alt', onSelect=function() dprint("Context: Issue Citation selected"); doCitation() end },
+                  { title='DUI / Field Tests', icon='wine-bottle', arrow=true, onSelect=function() lib.showContext('police_dui') end },
                   { title='Cuff Ped', icon='lock', onSelect=function() dprint("Context: Cuff Ped selected"); tryCuffPed() end },
                   { title='Arrest Ped', icon='handcuffs', onSelect=function() dprint("Context: Arrest Ped selected"); doArrest() end },
                   { title='Release Ped', icon='unlock', onSelect=function() dprint("Context: Release Ped selected"); releasePed() end },
@@ -2677,95 +4747,75 @@ local stopEnabled, debugEnabled = true, true
               })
 
               lib.registerContext({
+                id='police_questions',
+                title='💬 Ask Questions',
+                menu='police_ped',
+                canClose=true,
+                options={
+                  { title='Documentation', icon='id-card', onSelect=function() askPedQuestion('documentation') end },
+                  { title='Travel Plans', icon='route', onSelect=function() askPedQuestion('travel') end },
+                  { title='DUI / Impairment', icon='wine-bottle', onSelect=function() askPedQuestion('dui') end },
+                  { title='Personal', icon='user', onSelect=function() askPedQuestion('personal') end },
+                }
+              })
+
+              lib.registerContext({
+                id='police_dui',
+                title='🍺 DUI / Field Sobriety',
+                menu='police_ped',
+                canClose=true,
+                options={
+                  { title='Initial Observations', icon='eye', description='Document odor, speech, eyes, balance, and admissions.', onSelect=function() doDuiObservations() end },
+                  { title='Walk-and-Turn', icon='person-walking', description='Standardized field sobriety balance test. Requires subject on foot and uncuffed.', onSelect=function() doDuiTest('walk_turn') end },
+                  { title='Line Walk', icon='road', description='Simple straight-line balance check. Requires subject on foot and uncuffed.', onSelect=function() doDuiTest('line_walk') end },
+                  { title='One-Leg Stand', icon='person', description='Balance test. Requires subject on foot and uncuffed.', onSelect=function() doDuiTest('one_leg') end },
+                  { title='Eye Test / HGN', icon='eye', description='Checks eye tracking clues associated with impairment.', onSelect=function() doDuiTest('hgn') end },
+                  { title='Breathalyzer (PBT)', icon='wind', description='Roadside preliminary breath test.', onSelect=function() doDuiTest('breathalyzer') end },
+                  { title='BAC Test', icon='vial-circle-check', description='Formal evidential alcohol concentration test.', onSelect=function() doDuiTest('bac') end },
+                  { title='Drug Test', icon='capsules', description='Oral fluid / roadside drug screen.', onSelect=function() doDuiTest('drug') end },
+                  { title='Review DUI Summary', icon='clipboard-check', description='See all observations and test results with probable cause guidance.', onSelect=function() showDuiSummary() end },
+                }
+              })
+
+
+              lib.registerContext({
                 id='vehicle_interact',
                 title='🚗 Vehicle Interaction',
                 menu='police_mainai',
                 canClose=true,
                 options={
-            { title='Finish Pull-Over', icon='car', description='Let AI car go', onSelect=function()
+            { title='Finish Pull-Over', icon='car', description='Wait for you to get back in your vehicle, then let the stopped car leave', onSelect=function()
                 dprint("Context: Finish Pull-Over selected")
                 if not pullVeh or not DoesEntityExist(pullVeh) then return end
-
-                local occ = getPrimaryOccupant(pullVeh)
-                if occ and occ ~= 0 then
-                  local n = safePedToNet(occ)
-                  if n then
-                    setPedProtected(n, false)
-                    markPulledInVehicle(n, false)
-                    if pedData[n] then pedData[n].forcedStop = nil end
-                  end
-
-                  SetVehicleEngineOn(pullVeh, true, true, true)
-                  SetVehicleHandbrake(pullVeh, false)
-                  SetVehicleDoorsLocked(pullVeh, 1)
-                  SetVehicleUndriveable(pullVeh, false)
-
-                  releasePedAttention(occ)
-                  SetBlockingOfNonTemporaryEvents(occ, false)
-
-                  NetworkRequestControlOfEntity(occ)
-                  NetworkRequestControlOfEntity(pullVeh)
-
-                  local start = GetGameTimer()
-                  while not NetworkHasControlOfEntity(occ) and (GetGameTimer() - start) < 1000 do
-                    NetworkRequestControlOfEntity(occ); Citizen.Wait(10)
-                  end
-                  start = GetGameTimer()
-                  while not NetworkHasControlOfEntity(pullVeh) and (GetGameTimer() - start) < 1000 do
-                    NetworkRequestControlOfEntity(pullVeh); Citizen.Wait(10)
-                  end
-
-                  if not IsPedInVehicle(occ, pullVeh, true) or GetPedInVehicleSeat(pullVeh, -1) ~= occ then
-                    TaskWarpPedIntoVehicle(occ, pullVeh, -1)
-                    Citizen.Wait(150)
-                  end
-
-                  SetDriverAbility(occ, Config.Flee.driverAbility or 1.0)
-                  SetDriverAggressiveness(occ, Config.Flee.driverAggressiveness or 0.7)
-                  SetPedKeepTask(occ, true)
-
-                  local occNet_local = safePedToNet(occ) or tostring(occ)
-                  if pedData and pedData[tostring(occNet_local)] and (pedData[tostring(occNet_local)].wanted or pedData[tostring(occNet_local)].suspended) then
-                    if not attemptPedAttack(occ, pullVeh, occNet_local) then
-                      startFleeDrive(occ, pullVeh)
-                    end
-                  else
-                    TaskVehicleDriveWander(occ, pullVeh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
-                  end
-
-                  Citizen.CreateThread(function()
-                    Citizen.Wait(Config.Timings.postPullCheck)
-
-                    if DoesEntityExist(occ) and DoesEntityExist(pullVeh) then
-                      local speed = GetEntitySpeed(pullVeh)
-                      dprint(("Finish Pull-Over: speed after wander check = %.2f"):format(speed))
-                      if speed < 1.0 then
-                        dprint("Finish Pull-Over: wander didn't start — using drive-to-coord fallback")
-
-                        local dest = GetOffsetFromEntityInWorldCoords(pullVeh, 0.0, 200.0, 0.0)
-
-                        local model = GetEntityModel(pullVeh)
-                        TaskVehicleDriveToCoord(occ, pullVeh, dest.x, dest.y, dest.z, 20.0, 1.0, model, 786603, 5.0, true)
-
-                        Citizen.Wait(8000)
-                        if DoesEntityExist(occ) then SetPedKeepTask(occ, false) end
-                      else
-
-                        Citizen.Wait(5000)
-                        if DoesEntityExist(occ) then SetPedKeepTask(occ, false) end
-                      end
-                    end
-                  end)
-                else
-
-                  SetVehicleEngineOn(pullVeh, true, true, true)
-                  SetVehicleHandbrake(pullVeh, false)
-                  SetVehicleDoorsLocked(pullVeh, 1)
+                local veh = pullVeh
+                local function playerReadyToRelease()
+                  local player = PlayerPedId()
+                  if not IsPedInAnyVehicle(player, false) then return false end
+                  local playerVeh = GetVehiclePedIsIn(player, false)
+                  return playerVeh and playerVeh ~= 0 and playerVeh ~= veh
                 end
-
-                pullVeh = nil
-                notify("pull_finish","Pull-Over","Complete. Vehicle may leave.",'success')
+                if not playerReadyToRelease() then
+                  notify('pull_wait_vehicle', 'Finish Pull-Over', 'Get back into your patrol vehicle and the stopped car will leave once you are inside.', 'inform', 'car-side', '#4299E1')
+                  Citizen.CreateThread(function()
+                    local waited = 0
+                    while waited < 45000 do
+                      if playerReadyToRelease() then
+                        releasePulloverVehicle(veh)
+                        return
+                      end
+                      Citizen.Wait(300)
+                      waited = waited + 300
+                    end
+                    notify('pull_wait_timeout', 'Finish Pull-Over', 'Release cancelled because you never got back into your vehicle.', 'warning', 'car-side', '#DD6B20')
+                  end)
+                  return
+                end
+                releasePulloverVehicle(veh)
               end },
+
+                  { title='Tell Occupant Get In Vehicle', icon='car-side', description='Pick a seat and send the subject back into a vehicle', onSelect=function()
+                      tellPedEnterVehicle()
+                    end },
 
                   { title='Eject Driver (NPC)', icon='person', description='Make driver exit', onSelect=function()
                       dprint("Context: Eject Driver selected")
@@ -2785,9 +4835,32 @@ local stopEnabled, debugEnabled = true, true
 
                 }
               })
-            else
-              dprint("lib.registerContext not available; context menus not registered")
+
+              policeActionMenusRegistered = true
+              return true
             end
+
+            local function ensurePoliceActionMenus(force)
+              local ok, err = pcall(function() return registerPoliceActionMenus(force) end)
+              if not ok then
+                policeActionMenusRegistered = false
+                dprint(("registerPoliceActionMenus failed: %s"):format(tostring(err)))
+                return false
+              end
+              return true
+            end
+
+            Citizen.CreateThread(function()
+              local attempts = 0
+              while attempts < 40 do
+                attempts = attempts + 1
+                if ensurePoliceActionMenus(attempts > 1) then
+                  return
+                end
+                Citizen.Wait(250)
+              end
+              dprint("Police action menus were not registered after startup retries")
+            end)
 
             AddEventHandler('__clientRequestPopulate', function()
               local lastName = nil
@@ -2940,6 +5013,174 @@ local stopEnabled, debugEnabled = true, true
               cb('ok')
             end)
 
+
+            local function runAmbientSuspiciousReaction(player, ped, pedKey, info, dist)
+              local cfg = getImmersionConfig()
+              local behavior = cfg.behavior or {}
+              if behavior.enableAmbientReactions == false then return end
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              if not info or info.suspicious ~= true then return end
+              if info.cuffed or info.forcedStop or info.pulledProtected or info.pulledInVehicle then return end
+              local now = GetGameTimer()
+              if tonumber(info.reactionLockedUntil or 0) > now then return end
+              if IsPedDeadOrDying(ped, true) then return end
+
+              local inVehicle = IsPedInAnyVehicle(ped, false)
+              local reactionDistance = inVehicle and (tonumber(behavior.reactionDistanceVehicle) or 28.0) or (tonumber(behavior.reactionDistanceOnFoot) or 18.0)
+              local shouldReact = false
+              if IsPlayerFreeAimingAtEntity(PlayerId(), ped) then
+                shouldReact = true
+              elseif playerPresenceFeelsThreatening() and dist <= reactionDistance then
+                shouldReact = true
+              elseif dist <= (reactionDistance * 0.65) and (info.wanted or info.hasIllegalItems or info.isHigh or info.isDrunk) then
+                shouldReact = math.random() < 0.35
+              end
+              if not shouldReact then return end
+
+              info.reactionLockedUntil = now + (tonumber(behavior.cooldownMs) or 20000)
+              pedData[tostring(pedKey)] = info
+
+              NetworkRequestControlOfEntity(ped)
+              SetEntityAsMissionEntity(ped, true, true)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              SetPedKeepTask(ped, true)
+              pcall(SetPedAlertness, ped, info.wanted and 3 or 2)
+
+              local function triggerSuspiciousVehicleBehavior(driverPed, vehEntity, suspectInfo)
+                if not driverPed or driverPed == 0 or not DoesEntityExist(driverPed) then return false end
+                if not vehEntity or vehEntity == 0 or not DoesEntityExist(vehEntity) then return false end
+                if GetPedInVehicleSeat(vehEntity, -1) ~= driverPed then return false end
+
+                NetworkRequestControlOfEntity(vehEntity)
+                SetEntityAsMissionEntity(vehEntity, true, true)
+                SetVehicleEngineOn(vehEntity, true, true, true)
+                SetVehicleUndriveable(vehEntity, false)
+                SetVehicleHandbrake(vehEntity, false)
+                SetVehicleDoorsLocked(vehEntity, 1)
+
+                local isImpaired = suspectInfo and (suspectInfo.isDrunk or suspectInfo.isHigh)
+                local isSerious = suspectInfo and (suspectInfo.wanted or suspectInfo.hasIllegalItems)
+                local driveSpeed = isImpaired and 14.0 or (isSerious and 28.0 or 20.0)
+                local driveStyle = isImpaired and 786468 or ((Config and Config.Wander and Config.Wander.driveStyle) or 786603)
+
+                if type(SetDriverAbility) == "function" then pcall(SetDriverAbility, driverPed, isImpaired and 0.45 or 0.85) end
+                if type(SetDriverAggressiveness) == "function" then pcall(SetDriverAggressiveness, driverPed, isSerious and 0.85 or 0.45) end
+                if type(SetDriveTaskDrivingStyle) == "function" then pcall(SetDriveTaskDrivingStyle, driverPed, driveStyle) end
+                if type(SetDriveTaskCruiseSpeed) == "function" then pcall(SetDriveTaskCruiseSpeed, driverPed, driveSpeed) end
+
+                if isImpaired then
+                  SetVehicleForwardSpeed(vehEntity, math.max(GetEntitySpeed(vehEntity), 6.0))
+                  TaskVehicleDriveWander(driverPed, vehEntity, driveSpeed, driveStyle)
+                  Citizen.CreateThread(function()
+                    local untilAt = GetGameTimer() + 5000
+                    while GetGameTimer() < untilAt and DoesEntityExist(driverPed) and DoesEntityExist(vehEntity) and GetPedInVehicleSeat(vehEntity, -1) == driverPed do
+                      StartVehicleHorn(vehEntity, 120, GetHashKey("HELDDOWN"), false)
+                      TaskVehicleTempAction(driverPed, vehEntity, math.random(4, 5), math.random(350, 700))
+                      Citizen.Wait(math.random(850, 1400))
+                    end
+                  end)
+                elseif isSerious then
+                  if not startFleeDrive(driverPed, vehEntity) then
+                    TaskVehicleDriveWander(driverPed, vehEntity, driveSpeed, driveStyle)
+                    Citizen.CreateThread(function()
+                      StartVehicleHorn(vehEntity, 80, GetHashKey("HELDDOWN"), false)
+                    end)
+                  end
+                else
+                  TaskVehicleDriveWander(driverPed, vehEntity, driveSpeed, driveStyle)
+                  Citizen.CreateThread(function()
+                    StartVehicleHorn(vehEntity, 60, GetHashKey("HELDDOWN"), false)
+                  end)
+                end
+                return true
+              end
+
+              if inVehicle then
+                local veh = GetVehiclePedIsIn(ped, false)
+                if veh and veh ~= 0 then
+                  local driver = GetPedInVehicleSeat(veh, -1)
+                  if driver and driver ~= 0 and DoesEntityExist(driver) then
+                    triggerSuspiciousVehicleBehavior(driver, veh, info)
+                  end
+                  return
+                end
+              end
+
+              if info.disposition == 'hide' then
+                local pedCoords = GetEntityCoords(ped)
+                local playerCoords = GetEntityCoords(player)
+                local away = pedCoords - playerCoords
+                local distLen = #(away)
+                if distLen < 0.01 then away = vector3(1.0, 0.0, 0.0) distLen = 1.0 end
+                away = away / distLen
+                local side = vector3(-away.y, away.x, 0.0)
+                local sideMul = (math.random() < 0.5) and -1.0 or 1.0
+                local hideDist = tonumber(behavior.hideDistance) or 20.0
+                local target = pedCoords + (away * hideDist) + (side * 7.0 * sideMul)
+                TaskGoStraightToCoord(ped, target.x, target.y, target.z, 1.15, -1, 0.0, 0.0)
+                Citizen.CreateThread(function()
+                  Citizen.Wait(2500)
+                  if DoesEntityExist(ped) and not IsPedDeadOrDying(ped, true) and not IsPedInAnyVehicle(ped, false) then
+                    TaskWanderStandard(ped, 10.0, 10)
+                  end
+                end)
+                return
+              end
+
+              if info.disposition == 'nervous' and not info.wanted and not info.hasIllegalItems then
+                TaskWanderStandard(ped, 10.0, 10)
+                return
+              end
+
+              if type(TaskReactAndFleePed) == 'function' and math.random() < 0.55 then
+                TaskReactAndFleePed(ped, player)
+              else
+                TaskSmartFleePed(ped, player, 180.0, -1, false, false)
+              end
+            end
+
+            Citizen.CreateThread(function()
+              while true do
+                local cfg = getImmersionConfig()
+                local waitMs = tonumber(cfg.scanIntervalMs) or 2500
+                Citizen.Wait(waitMs)
+
+                if not immersionEnabled() then goto continue end
+                if cfg.requirePoliceJob == true and not isJobAllowed(job) then goto continue end
+                local player = PlayerPedId()
+                if not player or player == 0 then goto continue end
+                local playerCoords = GetEntityCoords(player)
+                local scanRadius = tonumber(cfg.scanRadius) or 55.0
+                local maxNearby = math.max(1, tonumber(cfg.maxNearbyPeds) or 18)
+                local nearby = {}
+                local pool = GetGamePool('CPed') or {}
+
+                for _, ped in ipairs(pool) do
+                  if ped ~= player and DoesEntityExist(ped) and not IsPedAPlayer(ped) and not IsPedDeadOrDying(ped, true) and IsPedHuman(ped) then
+                    local pedCoords = GetEntityCoords(ped)
+                    local dist = #(pedCoords - playerCoords)
+                    if dist <= scanRadius then
+                      nearby[#nearby + 1] = { ped = ped, dist = dist }
+                    end
+                  end
+                end
+
+                table.sort(nearby, function(a, b) return a.dist < b.dist end)
+                for i = 1, math.min(#nearby, maxNearby) do
+                  local entry = nearby[i]
+                  local ped = entry.ped
+                  local pedKey = tostring(safePedToNet(ped) or ped)
+                  ensurePerson(pedKey)
+                  pedData[pedKey] = pedData[pedKey] or {}
+                  pedData[pedKey].entity = ped
+                  pedData[pedKey] = enrichPedImmersionProfile(ped, pedData[pedKey])
+                  runAmbientSuspiciousReaction(player, ped, pedKey, pedData[pedKey], entry.dist)
+                end
+
+                ::continue::
+              end
+            end)
+
             RegisterNetEvent('mdt:plateResult', function(payload)
               lastPlate        = payload and payload.plate or lastPlate
               lastPlateHistory = payload and payload.records or lastPlateHistory
@@ -2970,34 +5211,56 @@ local stopEnabled, debugEnabled = true, true
                 end
               end
 
+              local payloadNetId = payload and payload.netId or ""
+              local payloadKey = tostring(payloadNetId or "")
+              if payloadKey ~= "" then
+                ensurePerson(payloadKey)
+                pedData[payloadKey] = pedData[payloadKey] or {}
+                pedData[payloadKey].licenseStatus = payload and payload.licenseStatus or ""
+                pedData[payloadKey].lastLookupAt = GetGameTimer()
+                pedData[payloadKey].idChecked = true
+                pedData[payloadKey].stopAwaitingId = false
+              end
+
               SendNUIMessage({
                 action        = 'idResult',
-                netId         = payload and payload.netId or "",
+                netId         = payloadNetId,
                 name          = payload and payload.name or "",
                 licenseStatus = payload and payload.licenseStatus or "",
                 records       = payload and payload.records or {}
               })
 
-              if payload and payload.netId then
-                local nid = tonumber(payload.netId) or payload.netId
-                Citizen.CreateThread(function()
-                  Citizen.Wait(3000)
-                  if nid and pedData[nid] and not pedData[nid].forcedStop then
-                    setPedProtected(nid, false)
-                    markPulledInVehicle(nid, false)
-                  end
-                end)
+              -- Do not release the stop or in-vehicle protection after an ID check.
+              -- Check ID should leave the target seated until an explicit release/end-stop action happens.
+            end)
+
+            RegisterNetEvent('police:syncNpcCuff', function(netId, state)
+              local ped = safeNetToPed(tonumber(netId) or netId)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              local pedKey = tostring(netId or safePedToNet(ped) or ped)
+              cachePedReference(ped, pedKey)
+              if state == false then
+                markPedCuffedState(ped, pedKey, false)
+                clearTrackedCuffStateForPed(ped, pedKey)
+                resetPedCuffPresentation(ped, false, false)
+                return
+              end
+              local isCuffed = isPedActuallyCuffed(ped, pedKey)
+              if not isCuffed then
+                applyCuffedPedState(ped, pedKey, false)
+              else
+                enforceCuffedPedState(ped, pedKey, pedData[tostring(pedKey)] or {})
               end
             end)
 
-            RegisterNetEvent('mdt:recordsResult')
-            AddEventHandler('mdt:recordsResult', function(rows, targetType)
-
-              SendNUIMessage({
-                action = 'recordsResult',
-                records = rows,
-                target_type = targetType
-              })
+            RegisterNetEvent('police:accountabilityNotice', function(payload)
+              payload = payload or {}
+              local level = tostring(payload.level or 'inform')
+              local title = tostring(payload.title or 'Officer Accountability')
+              local description = tostring(payload.description or '')
+              local icon = tostring(payload.icon or 'scale-balanced')
+              local color = tostring(payload.iconColor or '#DD6B20')
+              notify('police_accountability_' .. level, title, description, level, icon, color)
             end)
 
             RegisterNetEvent('mdt:reportsResult', function(records)
@@ -3044,10 +5307,10 @@ local stopEnabled, debugEnabled = true, true
             local function cancelNonForcedStops()
               local count = 0
               for netId, info in pairs(pedData) do
-                if info and info.pulledProtected and not info.forcedStop then
+                if info and info.pulledProtected and not info.forcedStop and not info.cuffed then
                   local ped = safeNetToPed(tonumber(netId) or netId)
                   if DoesEntityExist(ped) then
-                    releasePedAttention(ped)
+                    releasePedAttention(ped, true)
                     SetBlockingOfNonTemporaryEvents(ped, false)
                     SetPedKeepTask(ped, false)
                     SetEntityAsMissionEntity(ped, false, false)
@@ -3093,14 +5356,346 @@ local stopEnabled, debugEnabled = true, true
               return false
             end
 
+
+            local function getNearbyGunpointGroup(targetPed, player)
+              local cfg = (Config and Config.GunpointCompliance) or {}
+              local radius = tonumber(cfg.groupRadius) or 12.0
+              local maxGroupSize = math.max(1, tonumber(cfg.maxGroupSize) or 5)
+              local maxNearbyCandidates = math.max(maxGroupSize, tonumber(cfg.maxNearbyCandidates) or 10)
+              local anchorCoords = GetEntityCoords(targetPed)
+              local anchorVeh = IsPedInAnyVehicle(targetPed, false) and GetVehiclePedIsIn(targetPed, false) or 0
+              local results, seen = {}, {}
+
+              local function considerPed(ped, reason, engaged)
+                if not ped or ped == 0 or seen[ped] then return end
+                if not DoesEntityExist(ped) or IsPedAPlayer(ped) or IsEntityDead(ped) or not IsPedHuman(ped) then return end
+                if ped == player then return end
+
+                local sameVeh = anchorVeh ~= 0 and IsPedInAnyVehicle(ped, false) and GetVehiclePedIsIn(ped, false) == anchorVeh
+                local dist = #(GetEntityCoords(ped) - anchorCoords)
+                if not sameVeh and dist > radius then return end
+
+                local pedKey = tostring(safePedToNet(ped) or ped)
+                if isPedActuallyCuffed(ped, pedKey) then return end
+
+                ensurePerson(pedKey)
+                seen[ped] = true
+                results[#results + 1] = { ped = ped, key = pedKey, dist = dist, reason = reason or 'nearby', engaged = engaged == true }
+              end
+
+              considerPed(targetPed, 'target', IsPedInCombat(targetPed, player) or IsPedInMeleeCombat(targetPed))
+
+              if anchorVeh ~= 0 and (cfg.includePassengers ~= false) then
+                for seat = -1, GetVehicleMaxNumberOfPassengers(anchorVeh) - 1 do
+                  local occ = GetPedInVehicleSeat(anchorVeh, seat)
+                  if occ and occ ~= 0 then
+                    considerPed(occ, seat == -1 and 'driver' or 'occupant', IsPedInCombat(occ, player) or IsPedInMeleeCombat(occ))
+                  end
+                end
+              end
+
+              if cfg.includeNearbyCombatants ~= false then
+                local handle, ped = FindFirstPed()
+                local ok = (handle ~= -1)
+                local scanned = 0
+                while ok do
+                  if ped ~= targetPed and DoesEntityExist(ped) then
+                    local dist = #(GetEntityCoords(ped) - anchorCoords)
+                    if dist <= radius then
+                      local engaged = IsPedInCombat(ped, player) or IsPedInCombat(targetPed, ped) or IsPedInCombat(ped, targetPed) or IsPedInMeleeCombat(ped)
+                      local closeAssociate = dist <= math.max(4.5, radius * 0.45)
+                      if engaged or closeAssociate then
+                        considerPed(ped, engaged and 'combatant' or 'associate', engaged)
+                      end
+                    end
+                    scanned = scanned + 1
+                    if scanned >= maxNearbyCandidates then break end
+                  end
+                  ok, ped = FindNextPed(handle)
+                end
+                EndFindPed(handle)
+              end
+
+              table.sort(results, function(a, b)
+                if a.reason == 'target' then return true end
+                if b.reason == 'target' then return false end
+                if a.engaged ~= b.engaged then return a.engaged end
+                return a.dist < b.dist
+              end)
+
+              while #results > maxGroupSize do
+                table.remove(results)
+              end
+
+              return results
+            end
+
+            local function getGunpointResistanceScore(entry, isPrimary)
+              local cfg = (Config and Config.GunpointCompliance) or {}
+              local base = tonumber(cfg.baseSingleResistChance) or 0.14
+              local person = ensurePerson(entry.key) or {}
+              local score = base
+
+              if person.wanted then score = score + 0.20 end
+              if person.hasIllegalItems then score = score + 0.12 end
+              if person.isDrunk or person.isHigh then score = score + 0.08 end
+              if person.nervous then score = score + 0.05 end
+              if entry.engaged then score = score + 0.10 end
+              if isPrimary then score = score + 0.05 end
+
+              return math.min(0.85, math.max(0.05, score))
+            end
+
+            local function applyPedGunpointCompliance(targetPed, player, pedKey, delayMs, promoteLastPed)
+              Citizen.CreateThread(function()
+                if delayMs and delayMs > 0 then Citizen.Wait(delayMs) end
+                if not targetPed or targetPed == 0 or not DoesEntityExist(targetPed) or IsPedAPlayer(targetPed) then return end
+
+                local targetVeh = IsPedInAnyVehicle(targetPed, false) and GetVehiclePedIsIn(targetPed, false) or 0
+                if targetVeh and targetVeh ~= 0 and DoesEntityExist(targetVeh) then
+                  NetworkRequestControlOfEntity(targetVeh)
+                  SetVehicleDoorsLocked(targetVeh, 1)
+                  forcePedExitFromVehicle(targetPed, targetVeh)
+                  Citizen.Wait(350)
+                end
+
+                NetworkRequestControlOfEntity(targetPed)
+                ClearPedTasksImmediately(targetPed)
+                SetBlockingOfNonTemporaryEvents(targetPed, true)
+                SetPedCanRagdoll(targetPed, false)
+                SetPedKeepTask(targetPed, true)
+                TaskTurnPedToFaceEntity(targetPed, player, 1200)
+                TaskHandsUp(targetPed, 2500, player, -1, true)
+
+                pedData[tostring(pedKey)] = pedData[tostring(pedKey)] or {}
+                pedData[tostring(pedKey)].forcedStop = true
+                pedData[tostring(pedKey)].pulledProtected = true
+                pedData[tostring(pedKey)].gunpointState = 'complied'
+                pedData[tostring(pedKey)].gunpointResolvedAt = GetGameTimer()
+
+                if promoteLastPed then
+                  lastPedNetId = tostring(pedKey)
+                  lastPedEntity = targetPed
+                end
+
+                Citizen.CreateThread(function()
+                  Citizen.Wait(2200)
+                  if not DoesEntityExist(targetPed) then return end
+                  ClearPedTasks(targetPed)
+                  if loadAnimDictTimed("random@arrests@busted", 800) then
+                    TaskPlayAnim(targetPed, "random@arrests@busted", "idle_a", 4.0, -4.0, -1, 1, 0.0, false, false, false)
+                  else
+                    TaskCower(targetPed, -1)
+                  end
+                  holdPedAttention(targetPed, false)
+                end)
+              end)
+            end
+
+            local function applyPedGunpointFight(targetPed, player, pedKey, delayMs)
+              Citizen.CreateThread(function()
+                if delayMs and delayMs > 0 then Citizen.Wait(delayMs) end
+                if not targetPed or targetPed == 0 or not DoesEntityExist(targetPed) or IsPedAPlayer(targetPed) then return end
+
+                local targetVeh = IsPedInAnyVehicle(targetPed, false) and GetVehiclePedIsIn(targetPed, false) or 0
+                if targetVeh and targetVeh ~= 0 and DoesEntityExist(targetVeh) then
+                  NetworkRequestControlOfEntity(targetVeh)
+                  SetVehicleDoorsLocked(targetVeh, 1)
+                  forcePedExitFromVehicle(targetPed, targetVeh)
+                  Citizen.Wait(350)
+                end
+
+                NetworkRequestControlOfEntity(targetPed)
+                ClearPedTasksImmediately(targetPed)
+                SetBlockingOfNonTemporaryEvents(targetPed, false)
+                SetPedCanRagdoll(targetPed, true)
+                SetPedKeepTask(targetPed, true)
+                SetPedAsEnemy(targetPed, true)
+                SetPedFleeAttributes(targetPed, 0, false)
+                TaskCombatPed(targetPed, player, 0, 16)
+
+                pedData[tostring(pedKey)] = pedData[tostring(pedKey)] or {}
+                pedData[tostring(pedKey)].gunpointState = 'resisted'
+                pedData[tostring(pedKey)].gunpointResolvedAt = GetGameTimer()
+              end)
+            end
+
+            local function commandPedSurrenderAtGunpoint(targetPed)
+              if not targetPed or targetPed == 0 or not DoesEntityExist(targetPed) or IsPedAPlayer(targetPed) then return false end
+
+              local player = PlayerPedId()
+              local cfg = (Config and Config.GunpointCompliance) or {}
+              local group = getNearbyGunpointGroup(targetPed, player)
+              if not group or #group == 0 then return false end
+
+              local fightIndex = nil
+              local strongestIndex, strongestScore = nil, -1.0
+
+              for i, entry in ipairs(group) do
+                local score = getGunpointResistanceScore(entry, i == 1)
+                entry.resistanceScore = score
+                if score > strongestScore then
+                  strongestScore = score
+                  strongestIndex = i
+                end
+              end
+
+              if #group == 1 then
+                if math.random() < (group[1].resistanceScore or 0.14) then
+                  fightIndex = 1
+                end
+              elseif strongestIndex then
+                local chance = tonumber(cfg.groupOneFightsChance) or 0.42
+                chance = math.min(0.90, chance + math.max(0.0, (strongestScore or 0.0) - 0.24))
+                if math.random() < chance then
+                  fightIndex = strongestIndex
+                end
+              end
+
+              lastPedNetId = tostring(group[1].key)
+              lastPedEntity = group[1].ped
+
+              local complied, resisted = 0, 0
+              local delayMin = tonumber(cfg.delayMinMs) or 120
+              local delayMax = tonumber(cfg.delayMaxMs) or 520
+              if delayMax < delayMin then delayMax = delayMin end
+
+              for i, entry in ipairs(group) do
+                local delay = delayMin
+                if delayMax > delayMin then
+                  delay = delayMin + math.random(0, delayMax - delayMin)
+                end
+
+                if fightIndex and i == fightIndex then
+                  resisted = resisted + 1
+                  applyPedGunpointFight(entry.ped, player, entry.key, delay)
+                else
+                  complied = complied + 1
+                  applyPedGunpointCompliance(entry.ped, player, entry.key, delay, i == 1)
+                end
+              end
+
+              return {
+                ok = true,
+                total = #group,
+                complied = complied,
+                resisted = resisted,
+                primaryFought = fightIndex == 1
+              }
+            end
+
+            local gunpointHoldStart, gunpointHoldTarget, gunpointLastNotify, gunpointCooldown = 0, 0, 0, 0
+
+            local function isTargetModifierHeld()
+              return IsControlPressed(0, 19) or IsDisabledControlPressed(0, 19)
+            end
+
+            local function shouldSuppressAltTargetCombat()
+              local player = PlayerPedId()
+              if not player or player == 0 or not DoesEntityExist(player) then return false end
+              if IsEntityDead(player) or IsPauseMenuActive() or IsNuiFocused() then return false end
+              if not isTargetModifierHeld() then return false end
+              local weapon = GetSelectedPedWeapon(player)
+              if not weapon or weapon == 0 or weapon == `WEAPON_UNARMED` then return false end
+              return IsPedArmed(player, 6)
+            end
+
+            Citizen.CreateThread(function()
+              while true do
+                if shouldSuppressAltTargetCombat() then
+                  DisableControlAction(0, 24, true)
+                  DisableControlAction(0, 140, true)
+                  DisableControlAction(0, 141, true)
+                  DisableControlAction(0, 142, true)
+                  DisableControlAction(0, 257, true)
+                  DisableControlAction(0, 263, true)
+                  DisableControlAction(0, 264, true)
+                  Citizen.Wait(0)
+                else
+                  Citizen.Wait(50)
+                end
+              end
+            end)
+
+            Citizen.CreateThread(function()
+              while true do
+                Citizen.Wait(0)
+                if (GetGameTimer() < gunpointCooldown) or IsPauseMenuActive() or IsNuiFocused() then
+                  gunpointHoldStart, gunpointHoldTarget = 0, 0
+                else
+                  local player = PlayerPedId()
+                  local armed = IsPedArmed(player, 6)
+                  local aiming = IsPlayerFreeAiming(PlayerId())
+                  local _, aimedEntity = GetEntityPlayerIsFreeAimingAt(PlayerId())
+
+                  if armed and aiming and IsControlPressed(0, 21) and aimedEntity and aimedEntity ~= 0 and DoesEntityExist(aimedEntity) then
+                    local targetPed = nil
+                    if IsEntityAPed(aimedEntity) then
+                      targetPed = aimedEntity
+                    elseif IsEntityAVehicle(aimedEntity) then
+                      local driver = GetPedInVehicleSeat(aimedEntity, -1)
+                      if driver and driver ~= 0 and not IsPedAPlayer(driver) then
+                        targetPed = driver
+                      end
+                    end
+
+                    if targetPed and not IsPedAPlayer(targetPed) then
+                      if gunpointHoldTarget ~= targetPed then
+                        gunpointHoldTarget = targetPed
+                        gunpointHoldStart = GetGameTimer()
+                        if type(notify) == "function" and (GetGameTimer() - gunpointLastNotify) > 1500 then
+                          notify("felony_hold", "Gunpoint Compliance", "Keep holding LEFT SHIFT while aiming to force surrender.", 'inform', 'gun', '#4299E1')
+                          gunpointLastNotify = GetGameTimer()
+                        end
+                      elseif (GetGameTimer() - gunpointHoldStart) >= 3000 then
+                        local result = commandPedSurrenderAtGunpoint(targetPed)
+                        if result and result.ok then
+                          if (result.resisted or 0) > 0 and (result.complied or 0) > 0 then
+                            notify("felony_done", "Split Compliance", string.format("%d complied and %d chose to fight.", result.complied or 0, result.resisted or 0), 'warning', 'person-rays', '#DD6B20')
+                          elseif (result.resisted or 0) > 0 then
+                            notify("felony_done", "Resistance", "The suspect chose to fight instead of complying.", 'warning', 'person-rays', '#DD6B20')
+                          elseif (result.total or 0) > 1 then
+                            notify("felony_done", "Group Compliance", string.format("%d suspects complied at gunpoint.", result.complied or result.total or 0), 'success', 'person-rays', '#38A169')
+                          else
+                            notify("felony_done", "Compliance", "Suspect complied at gunpoint.", 'success', 'person-rays', '#38A169')
+                          end
+                          gunpointCooldown = GetGameTimer() + ((Config and Config.GunpointCompliance and Config.GunpointCompliance.cooldownMs) or 4500)
+                        end
+                        gunpointHoldStart, gunpointHoldTarget = 0, 0
+                      end
+                    else
+                      gunpointHoldStart, gunpointHoldTarget = 0, 0
+                    end
+                  else
+                    gunpointHoldStart, gunpointHoldTarget = 0, 0
+                  end
+                end
+              end
+            end)
+
             local function tryOpenPoliceMenu()
               if policeMenuBusy then return end
               policeMenuBusy = true
               getPlayerJobFromServer(function(job)
                 policeMenuBusy = false
                 if not isPoliceMenuJob(job) then return end
-                if lib and lib.showContext then
-                  lib.showContext('police_mainai')
+                if type(lib) ~= "table" or type(lib.showContext) ~= "function" then
+                  return
+                end
+                if not ensurePoliceActionMenus() then
+                  doNotify({ id = "police_menu_missing", title = "Police Actions", description = "The ox_lib police menu was not ready yet. Try again in a moment.", type = "error", duration = 5000 })
+                  return
+                end
+                local ok, err = pcall(function() lib.showContext('police_mainai') end)
+                if not ok then
+                  policeActionMenusRegistered = false
+                  if ensurePoliceActionMenus(true) then
+                    ok = pcall(function() lib.showContext('police_mainai') end)
+                  end
+                end
+                if not ok then
+                  doNotify({ id = "police_menu_open_failed", title = "Police Actions", description = "Failed to open the ox_lib police menu.", type = "error", duration = 5000 })
+                  dprint(("tryOpenPoliceMenu failed: %s"):format(tostring(err)))
                 end
               end)
             end
@@ -3109,44 +5704,76 @@ local stopEnabled, debugEnabled = true, true
             end)
             RegisterKeyMapping('aipolicemenu','Open Police Actions','keyboard','F6')
 
+            local function markTrafficStopVehicle()
+              if not inEmergencyVehicle() then
+                return notify("pull_err","Traffic Stop","You must be in an emergency vehicle.",'error','car','#E53E3E')
+              end
+
+              local best = findVehicleAhead(25, 0.45)
+              if not best or not DoesEntityExist(best) then
+                return notify("pull_err","Traffic Stop","No vehicle ahead to mark.",'error','car','#E53E3E')
+              end
+
+              pendingPullVeh = best
+              pendingPullDeadline = GetGameTimer() + 30000
+              pullVeh = best
+
+              local plate = (GetVehicleNumberPlateText(best) or ""):match("%S+") or "UNKNOWN"
+              pendingPullState = 'waiting_for_emergency_signal'
+              notify("pull_marked","Traffic Stop Step 1",("Marked %s. Waiting for police lights / sirens. Once they turn on, the vehicle will slow down and pull right. Press G to cancel."):format(plate),'inform','siren-on','#4299E1')
+
+              if not pendingPullMonitor then
+                pendingPullMonitor = true
+                Citizen.CreateThread(function()
+                  while pendingPullVeh do
+                    Citizen.Wait(40)
+                    if not DoesEntityExist(pendingPullVeh) then
+                      pendingPullVeh = nil
+                      break
+                    end
+                    local player = PlayerPedId()
+                    local myVeh = GetVehiclePedIsIn(player, false)
+                    if not myVeh or myVeh == 0 or not inEmergencyVehicle() then
+                      pendingPullVeh = nil
+                      break
+                    end
+                    if GetGameTimer() > pendingPullDeadline then
+                      pendingPullState = 'idle'
+                      notify("pull_mark_expire","Marked Vehicle Lost","Marked vehicle timed out. Mark it again with LEFT SHIFT + E.",'warning','ban','#DD6B20')
+                      pendingPullVeh = nil
+                      break
+                    end
+                    if isPullOverSignalActive(myVeh) then
+                      pendingPullState = 'initiating_stop'
+                      local marked = pendingPullVeh
+                      pendingPullVeh = nil
+                      attemptPullOverAI(false, marked)
+                      break
+                    end
+                  end
+                  pendingPullMonitor = false
+                end)
+              end
+            end
+
             RegisterCommand('stopAI', function()
-              local player = PlayerPedId()
-              if not IsControlPressed(0, 21) then
-                if type(notify) == "function" then
-                  notify("stop_require", "Hold Modifier", "You must start holding LEFT SHIFT while pressing E to initiate a stop.", 'warning', 'ban', '#DD6B20')
-                end
+              local inVeh = IsPedInAnyVehicle(PlayerPedId(), false)
+              local holdingShift = IsControlPressed(0, 21) or IsDisabledControlPressed(0, 21)
+
+              if not holdingShift then
+                return notify("stop_require", "Hold Modifier", "Hold LEFT SHIFT and press E.", 'warning', 'ban', '#DD6B20')
+              end
+
+              if inVeh and type(inEmergencyVehicle) == 'function' and inEmergencyVehicle() then
+                markTrafficStopVehicle()
                 return
               end
 
-              local holdStart = GetGameTimer()
-              local holdDuration = 3000
-
-              if type(notify) == "function" then
-                notify("stop_hold", "Preparing Stop", "Keep holding LEFT SHIFT for 3 seconds to confirm the stop...", 'inform', 'hourglass', '#4299E1')
-              end
-
-              while (GetGameTimer() - holdStart) < holdDuration do
-                if not IsControlPressed(0, 21) then
-                  if type(notify) == "function" then
-                    notify("stop_hold_fail", "Hold Aborted", "You released LEFT SHIFT too early. Stop cancelled.", 'error', 'ban', '#E53E3E')
-                  end
-                  return
-                end
-                Citizen.Wait(Config.Timings.shortWait)
-              end
-
-              local inVeh = IsPedInAnyVehicle(player, false)
-              if inVeh and type(inEmergencyVehicle) == 'function' and inEmergencyVehicle() then
-                if type(attemptPullOverAI) == 'function' then
-                  attemptPullOverAI(false)
-                end
-              else
-                if type(attemptStopOnFoot) == 'function' then
-                  attemptStopOnFoot(false)
-                end
+              if type(attemptStopOnFoot) == 'function' then
+                attemptStopOnFoot(false)
               end
             end)
-            RegisterKeyMapping('stopAI', 'Stop/Traffic Stop (Hold LEFT SHIFT + E for 3s)', 'keyboard', 'E')
+            RegisterKeyMapping('stopAI', 'Mark traffic stop / initiate AI stop (LEFT SHIFT + E)', 'keyboard', 'E')
 
             RegisterCommand('cancelStopsCmd', function()
               cancelNonForcedStops()
@@ -3156,12 +5783,48 @@ local stopEnabled, debugEnabled = true, true
             RegisterCommand('showid', function() if lastPedNetId then showIDSafely(lastPedNetId) else dprint("showid: no lastPedNetId") end end)
             RegisterKeyMapping('showid','Show Last Ped ID','keyboard','J')
 
+            RegisterCommand('cancelMarkedTrafficStop', function()
+              if pendingPullVeh and DoesEntityExist(pendingPullVeh) then
+                pendingPullState = 'idle'
+                pendingPullVeh = nil
+                pendingPullDeadline = 0
+                notify("pull_mark_cancel","Traffic Stop Canceled","Marked vehicle cleared.",'warning','ban','#DD6B20')
+              end
+            end)
+            RegisterKeyMapping('cancelMarkedTrafficStop', 'Cancel marked traffic stop', 'keyboard', 'G')
+
+            RegisterCommand('toggleNpcCuff', function()
+              if pendingPullVeh then
+                pendingPullVeh = nil
+                pendingPullDeadline = 0
+                notify("pull_mark_cancel","Traffic Stop Canceled","Marked vehicle cleared.",'warning','ban','#DD6B20')
+              else
+                dprint("toggleNpcCuff command -> tryCuffPed")
+                tryCuffPed()
+              end
+            end)
+            RegisterKeyMapping('toggleNpcCuff', 'Cuff / uncuff last stopped ped', 'keyboard', 'N')
+
             Citizen.CreateThread(function()
               while true do
-                Citizen.Wait(0)
-                if IsControlJustReleased(0,249) then
-                  dprint("G pressed -> tryCuffPed")
-                  tryCuffPed()
+                Citizen.Wait((Config.PedCustody and Config.PedCustody.cuffReapplyIntervalMs) or 250)
+                local now = GetGameTimer()
+                local processed = {}
+                for pedKey, info in pairs(pedData) do
+                  local canonical = tostring((info and info.cuffCanonicalKey) or pedKey)
+                  if not processed[canonical] then
+                    processed[canonical] = true
+                    local ped, resolvedKey = resolveTrackedPedFromKey(canonical, pedData[canonical] or info)
+                    if ped and ped ~= 0 and DoesEntityExist(ped) then
+                      local cuffed = isPedActuallyCuffed(ped, resolvedKey or canonical)
+                      local entry = pedData[tostring(canonical)] or pedData[tostring(resolvedKey or canonical)] or info
+                      local recentlyUncuffedUntil = tonumber((entry and entry.recentlyUncuffedUntil) or 0) or 0
+                      if cuffed and recentlyUncuffedUntil <= now then
+                        cachePedReference(ped, resolvedKey or canonical)
+                        enforceCuffedPedState(ped, tostring(resolvedKey or canonical), entry)
+                      end
+                    end
+                  end
                 end
               end
             end)
@@ -3178,13 +5841,51 @@ local stopEnabled, debugEnabled = true, true
                 lastPedNetId = nil; lastPedEntity = nil
                 return notify("search_no_exist","No Ped","Target no longer exists.",'error','magnifying-glass','#E53E3E')
               end
-              if math.random() < 0.2 then
+
+              local searchKey = tostring(tonumber(nid) or nid or safePedToNet(ped) or lastPedNetId or ped)
+              local profile = pedData and pedData[searchKey] or nil
+              local foundItems = {}
+              local contrabandCatalog = {
+                "Marijuana baggie",
+                "Open alcohol container",
+                "Small meth package",
+                "Burglary tools",
+                "Loose pills",
+                "Stolen property receipt",
+                "Unserialized handgun",
+              }
+
+              playSimpleConversationAnim(ped, "refuse")
+              if math.random() < 0.15 then
                 notify("search_fail","Interrupted","Search interrupted, but ped remains.",'error','person-running','#E53E3E')
                 holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
+                return
+              end
+
+              if profile and profile.hasIllegalItems then
+                foundItems[#foundItems + 1] = contrabandCatalog[math.random(#contrabandCatalog)]
+                if math.random() < 0.28 then
+                  foundItems[#foundItems + 1] = contrabandCatalog[math.random(#contrabandCatalog)]
+                end
+              end
+
+              if #foundItems > 0 then
+                local summary = table.concat(foundItems, ', ')
+                notify("search_hit","Search",summary,'success','magnifying-glass','#38A169')
+                local sceneId = LocalPlayer and LocalPlayer.state and LocalPlayer.state.az5pdSceneId or nil
+                if sceneId then
+                  for i = 1, #foundItems do
+                    TriggerServerEvent('az5pd:sim:addEvidence', sceneId, {
+                      type = 'Contraband',
+                      description = foundItems[i],
+                      category = foundItems[i]
+                    })
+                  end
+                end
               else
                 notify("search_ok","Search","Nothing found.",'success','magnifying-glass','#38A169')
-                holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
               end
+              holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
             end
 
             function doCitation()
@@ -3194,6 +5895,10 @@ local stopEnabled, debugEnabled = true, true
                 dprint("doCitation: no ped resolved")
                 return notify("cite_no","No Ped","None stopped.",'error','ticket','#E53E3E')
               end
+
+              local citationKey = tostring(tonumber(nid) or nid or safePedToNet(ped) or lastPedNetId or ped)
+              lastPedNetId = citationKey
+              lastPedEntity = ped
 
               local def = citationReasons[math.random(#citationReasons)]
 
@@ -3210,9 +5915,10 @@ local stopEnabled, debugEnabled = true, true
               end
 
               local function sendCitation(reason, fine)
-                dprint("sendCitation:", tostring(lastPedNetId), tostring(reason), tostring(fine))
+                playSimpleConversationAnim(ped, "handoff")
+                dprint("sendCitation:", tostring(citationKey), tostring(reason), tostring(fine))
                 TriggerServerEvent('police:issueCitation',
-                  lastPedNetId, reason, fine, getPedName(lastPedNetId))
+                  citationKey, reason, fine, getPedName(citationKey))
                 notify("cite_ok","Citation","Reason:"..reason.." Fine:$"..tostring(fine),'success','ticket-alt','#38A169')
                 if DoesEntityExist(ped) then holdPedAttention(ped, IsPedInAnyVehicle(ped, false)) end
               end
@@ -3232,6 +5938,901 @@ local stopEnabled, debugEnabled = true, true
               end
             end
 
+
+            function duiRound(value, places)
+              local mult = 10 ^ (places or 0)
+              return math.floor((tonumber(value) or 0) * mult + 0.5) / mult
+            end
+
+            function duiClamp(value, minVal, maxVal)
+              value = tonumber(value) or 0.0
+              if value < minVal then return minVal end
+              if value > maxVal then return maxVal end
+              return value
+            end
+
+            function duiRandomFloat(minVal, maxVal)
+              minVal = tonumber(minVal) or 0.0
+              maxVal = tonumber(maxVal) or minVal
+              if maxVal < minVal then minVal, maxVal = maxVal, minVal end
+              return minVal + (math.random() * (maxVal - minVal))
+            end
+
+            function duiShuffle(list)
+              local arr = {}
+              for i = 1, #list do arr[i] = list[i] end
+              for i = #arr, 2, -1 do
+                local j = math.random(i)
+                arr[i], arr[j] = arr[j], arr[i]
+              end
+              return arr
+            end
+
+            function duiPick(list, count)
+              local chosen, out = duiShuffle(list), {}
+              count = math.max(0, math.min(#chosen, tonumber(count) or 0))
+              for i = 1, count do out[#out + 1] = chosen[i] end
+              return out
+            end
+
+            function duiJoinLines(items, prefix)
+              local lines = {}
+              prefix = prefix or '- '
+              for i = 1, #items do
+                lines[#lines + 1] = prefix .. tostring(items[i])
+              end
+              return table.concat(lines, '\n')
+            end
+
+            function duiGetTargetPed(requireExisting)
+              local ped, nid = resolveLastPed()
+              if not ped then
+                notify('dui_no_ped', 'No Ped', 'Stop or select a subject first.', 'error', 'wine-bottle', '#E53E3E')
+                return nil
+              end
+              if not DoesEntityExist(ped) or IsPedAPlayer(ped) then
+                notify('dui_bad_ped', 'Invalid Subject', 'Target no longer exists or is player-controlled.', 'error', 'ban', '#E53E3E')
+                return nil
+              end
+              local pedKey = tostring(tonumber(nid) or nid or safePedToNet(ped) or lastPedNetId or ped)
+              lastPedNetId = pedKey
+              lastPedEntity = ped
+              local info = ensurePerson(pedKey) or {}
+              if enrichPedImmersionProfile then
+                info = enrichPedImmersionProfile(ped, info) or info
+                pedData[pedKey] = info
+              end
+              if requireExisting and not pedData[pedKey] then
+                notify('dui_missing_subject', 'No Subject', 'Could not establish subject state for testing.', 'error', 'triangle-exclamation', '#E53E3E')
+                return nil
+              end
+              return ped, pedKey, info
+            end
+
+            function duiNow()
+              local cloud = type(GetCloudTimeAsInt) == 'function' and GetCloudTimeAsInt() or 0
+              if type(cloud) == 'number' and cloud > 0 then return cloud end
+              return math.floor(GetGameTimer() / 1000)
+            end
+
+            function duiGetCase(info)
+              info.duiCase = info.duiCase or {
+                createdAt = duiNow(),
+                observations = nil,
+                notes = {},
+                tests = {},
+                impliedConsentRead = false,
+                lastSummaryAt = nil,
+              }
+              return info.duiCase
+            end
+
+            function duiGetProfile(ped, pedKey, info)
+              info = info or ensurePerson(pedKey) or {}
+              if info.duiProfile and info.duiProfile.generated then return info.duiProfile end
+
+              local drugCatalog = {
+                {
+                  name = 'THC',
+                  observation = {'odor of marijuana on clothing', 'bloodshot eyes', 'slow deliberate speech'},
+                  eye = {'lack of smooth pursuit', 'eyelid tremors', 'slowed pupil reaction'},
+                  result = 'Positive for THC'
+                },
+                {
+                  name = 'Methamphetamine',
+                  observation = {'rapid speech', 'jaw tension', 'restless body movement'},
+                  eye = {'dilated pupils', 'rapid eye movement', 'overly alert gaze'},
+                  result = 'Positive for amphetamine / methamphetamine'
+                },
+                {
+                  name = 'Cocaine',
+                  observation = {'fast speech', 'clenched jaw', 'sweaty restless presentation'},
+                  eye = {'dilated pupils', 'rapid eye movement', 'difficulty focusing'},
+                  result = 'Positive for cocaine metabolite'
+                },
+                {
+                  name = 'Opiates',
+                  observation = {'droopy eyelids', 'slow sluggish responses', 'drowsy posture'},
+                  eye = {'pinpoint pupils', 'slow eye reaction', 'difficulty maintaining attention'},
+                  result = 'Positive for opiates'
+                },
+                {
+                  name = 'Benzodiazepines',
+                  observation = {'slowed speech', 'poor coordination', 'delayed responses'},
+                  eye = {'poor convergence', 'slow tracking', 'drooping eyelids'},
+                  result = 'Positive for benzodiazepines'
+                }
+              }
+
+              local isDrunk = info.isDrunk == true
+              local isHigh = info.isHigh == true
+              local nervous = info.nervous == true
+              local suspicious = info.suspicious == true
+              local medicalIssue = (math.random() < (((isDrunk or isHigh) and 0.08) or 0.12))
+              local alcoholLevel = 0.0
+              if isDrunk then
+                alcoholLevel = duiRandomFloat(0.078, 0.168)
+                if math.random() < 0.25 then alcoholLevel = duiRandomFloat(0.170, 0.220) end
+              elseif isHigh then
+                alcoholLevel = duiRandomFloat(0.000, 0.030)
+              elseif suspicious then
+                alcoholLevel = duiRandomFloat(0.000, 0.050)
+              else
+                alcoholLevel = duiRandomFloat(0.000, 0.025)
+              end
+              alcoholLevel = duiClamp(alcoholLevel, 0.0, 0.240)
+
+              local drugEntry = nil
+              if isHigh then drugEntry = drugCatalog[math.random(#drugCatalog)] end
+
+              local refusalChance = 0.08
+              if isDrunk then refusalChance = refusalChance + 0.16 end
+              if isHigh then refusalChance = refusalChance + 0.18 end
+              if info.wanted then refusalChance = refusalChance + 0.08 end
+              if info.hasIllegalItems then refusalChance = refusalChance + 0.06 end
+              if nervous then refusalChance = refusalChance + 0.04 end
+              refusalChance = duiClamp(refusalChance, 0.05, 0.82)
+
+              local odor = isDrunk and ({'strong odor of alcoholic beverage', 'moderate odor of alcohol', 'fresh beer odor'})[math.random(3)] or ((drugEntry and drugEntry.name == 'THC') and 'odor of marijuana present' or 'no obvious alcohol odor')
+              local speech = isDrunk and ({'slurred speech', 'thick-tongued answers', 'slow delayed responses'})[math.random(3)]
+                or (drugEntry and ({'rambling inconsistent answers', 'slow confused responses', 'overly fast pressured speech'})[math.random(3)])
+                or (nervous and 'noticeably nervous speech' or 'normal speech pattern')
+              local balance = (isDrunk or isHigh) and ({'noticeable sway while standing', 'uses arms for balance', 'unsteady stance'})[math.random(3)]
+                or (medicalIssue and 'favors one leg / possible prior injury' or 'steady balance at rest')
+              local eyes = isDrunk and ({'bloodshot watery eyes', 'glassy eyes', 'difficulty holding steady gaze'})[math.random(3)]
+                or (drugEntry and drugEntry.eye[math.random(#drugEntry.eye)])
+                or 'eyes appear normal'
+
+              local profile = {
+                generated = true,
+                alcoholLevel = alcoholLevel,
+                roadsideBrAC = duiClamp(alcoholLevel + duiRandomFloat(-0.008, 0.008), 0.0, 0.240),
+                evidentialBAC = duiClamp(alcoholLevel + duiRandomFloat(-0.004, 0.004), 0.0, 0.240),
+                drugEntry = drugEntry,
+                refusalChance = refusalChance,
+                nervous = nervous,
+                medicalIssue = medicalIssue,
+                suspicious = suspicious,
+                odor = odor,
+                speech = speech,
+                balance = balance,
+                eyes = eyes,
+                openContainer = isDrunk and math.random() < 0.28,
+                admission = isDrunk and ({'admits to having a couple drinks', 'admits to drinking earlier tonight', 'initially denies drinking, then changes story'})[math.random(3)]
+                  or (isHigh and ({'admits to smoking earlier', 'admits to taking medication before driving', 'denies use despite impairment clues'})[math.random(3)] or 'denies alcohol or drug use'),
+              }
+              info.duiProfile = profile
+              pedData[pedKey] = info
+              return profile
+            end
+
+            function duiSaveRecord(pedKey, info, title, description, rtype)
+              if not pedKey then return end
+              local targetValue = tostring((info and info.name) or ''):gsub('^%s+', ''):gsub('%s+$', '')
+              local targetType = 'name'
+              if targetValue == '' then
+                targetType = 'netId'
+                targetValue = tostring(pedKey)
+              end
+              TriggerServerEvent('mdt:createRecord', {
+                target_type = targetType,
+                target_value = targetValue,
+                rtype = rtype or 'dui',
+                title = tostring(title or 'DUI Investigation'),
+                description = tostring(description or ''),
+              })
+            end
+
+            function duiMakeSummaryHeader(info, profile)
+              local name = tostring((info and info.name) or 'Unknown Subject')
+              local lines = {
+                ('Subject: %s'):format(name),
+                ('Alcohol profile: %.3f BAC'):format(tonumber((profile and profile.evidentialBAC) or 0.0) or 0.0),
+                ('Drug indicator baseline: %s'):format((profile and profile.drugEntry and profile.drugEntry.name) or 'None observed'),
+              }
+              return table.concat(lines, '\n')
+            end
+
+            function duiChemicalRefusal(info, profile, kind)
+              local roll = math.random()
+              local chance = tonumber((profile and profile.refusalChance) or 0.08) or 0.08
+              local duiCase = duiGetCase(info)
+              if kind == 'bac' or kind == 'drug' then chance = chance + 0.10 end
+              if duiCase and duiCase.refusalCount then chance = chance + (0.08 * duiCase.refusalCount) end
+              return roll < duiClamp(chance, 0.05, 0.92)
+            end
+
+            function duiRequireOnFootAndUncuffed(ped, info, label)
+              if IsPedInAnyVehicle(ped, false) then
+                notify('dui_vehicle_required_exit', label or 'Field Sobriety Test', 'Have the subject exit the vehicle before running this test.', 'warning', 'car-side', '#DD6B20')
+                return false
+              end
+              if info and info.cuffed then
+                notify('dui_uncuff_required', label or 'Field Sobriety Test', 'Uncuff the subject before running a balancing / movement test.', 'warning', 'unlock', '#DD6B20')
+                return false
+              end
+              return true
+            end
+
+            function duiRunProgress(label, duration, animMode)
+              local player = PlayerPedId()
+              if animMode == 'note' and loadAnimDictTimed('missheistdockssetup1clipboard@base', 1200) then
+                TaskPlayAnim(player, 'missheistdockssetup1clipboard@base', 'base', 3.0, -3.0, duration + 200, 49, 0.0, false, false, false)
+              end
+              local ok = safeProgressBar({
+                duration = duration,
+                label = label,
+                canCancel = true,
+                disable = { car = true, move = true, combat = true, mouse = false }
+              })
+              ClearPedTasks(player)
+              return ok
+            end
+
+
+            DUI_IMPAIRED_CLIPSETS = {
+              slight = 'MOVE_M@DRUNK@SLIGHTLYDRUNK',
+              moderate = 'MOVE_M@DRUNK@MODERATEDRUNK',
+              heavy = 'MOVE_M@DRUNK@VERYDRUNK',
+            }
+
+            function duiResetMovementVisual(ped)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              ResetPedMovementClipset(ped, 0.25)
+            end
+
+            function duiApplyImpairedMovementVisual(ped, profile, result)
+              if not ped or ped == 0 or not DoesEntityExist(ped) or IsPedInAnyVehicle(ped, false) then return false end
+              local status = result and tostring(result.status or '') or ''
+              local clip = nil
+              if status == 'FAIL' or status == 'POSITIVE' then
+                if profile and ((tonumber(profile.alcoholLevel) or 0.0) >= 0.14 or profile.alcoholHeavy) then
+                  clip = DUI_IMPAIRED_CLIPSETS.heavy
+                else
+                  clip = DUI_IMPAIRED_CLIPSETS.moderate
+                end
+              elseif status == 'WARN' or status == 'PARTIAL' then
+                clip = DUI_IMPAIRED_CLIPSETS.slight
+              end
+              if clip and loadAnimSetTimed and loadAnimSetTimed(clip, 1200) then
+                SetPedMovementClipset(ped, clip, 0.25)
+                return true
+              end
+              return false
+            end
+
+            function duiPlayOfficerAnimForTest(kind, duration)
+              local player = PlayerPedId()
+              duration = tonumber(duration) or 3500
+              if kind == 'breathalyzer' or kind == 'drug' then
+                if loadAnimDictTimed('mp_common', 1200) then
+                  TaskPlayAnim(player, 'mp_common', 'givetake1_a', 4.0, -4.0, duration, 49, 0.0, false, false, false)
+                  return true
+                end
+              end
+              if kind == 'bac' or kind == 'observations' then
+                if loadAnimDictTimed('missheistdockssetup1clipboard@base', 1200) then
+                  TaskPlayAnim(player, 'missheistdockssetup1clipboard@base', 'base', 3.0, -3.0, duration, 49, 0.0, false, false, false)
+                  return true
+                end
+              end
+              return false
+            end
+
+            function duiPlaySubjectChemicalVisual(kind, ped, duration)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              duration = tonumber(duration) or 4000
+              if IsPedInAnyVehicle(ped, false) then
+                TaskTurnPedToFaceEntity(ped, PlayerPedId(), 900)
+                TaskLookAtEntity(ped, PlayerPedId(), duration, 2048, 3)
+                return
+              end
+              ClearPedTasks(ped)
+              TaskTurnPedToFaceEntity(ped, PlayerPedId(), 900)
+              TaskLookAtEntity(ped, PlayerPedId(), duration, 2048, 3)
+              if kind == 'breathalyzer' or kind == 'drug' then
+                if loadAnimDictTimed('mp_common', 1200) then
+                  TaskPlayAnim(ped, 'mp_common', 'givetake1_b', 4.0, -4.0, math.floor(duration * 0.8), 49, 0.0, false, false, false)
+                  return
+                end
+              end
+              TaskStandStill(ped, duration)
+            end
+
+            function duiHeadingForward(heading)
+              local hr = math.rad(tonumber(heading) or 0.0)
+              return -math.sin(hr), math.cos(hr)
+            end
+
+            function duiGetSpotNearOfficer(preferRoadNode)
+              local player = PlayerPedId()
+              local ox, oy, oz = table.unpack(GetOffsetFromEntityInWorldCoords(player, 1.2, 3.0, 0.0))
+              local spot = vector3(ox, oy, oz)
+              local heading = GetEntityHeading(player)
+              if preferRoadNode then
+                local nodePos, nodeHeading, ok = getClosestVehicleNodePosHeading(ox, oy, oz, 1, 3.0, 0)
+                if ok and nodePos then
+                  spot = vector3(nodePos.x, nodePos.y, nodePos.z)
+                  heading = tonumber(nodeHeading) or heading
+                end
+              end
+              local okGround, gz = GetGroundZFor_3dCoord(spot.x, spot.y, spot.z + 3.0, false)
+              if okGround then spot = vector3(spot.x, spot.y, gz + 0.03) end
+              return spot, heading
+            end
+
+            function duiAwaitPedNear(ped, target, tolerance, timeoutMs)
+              local started = GetGameTimer()
+              tolerance = tonumber(tolerance) or 1.2
+              timeoutMs = tonumber(timeoutMs) or 7000
+              while DoesEntityExist(ped) and (GetGameTimer() - started) < timeoutMs do
+                local pcoords = GetEntityCoords(ped)
+                local dist = #(pcoords - target)
+                if dist <= tolerance then return true end
+                if IsPedInAnyVehicle(ped, false) then return false end
+                Citizen.Wait(100)
+              end
+              return false
+            end
+
+            function duiMovePedToSpot(ped, spot, heading, timeoutMs, allowWarp)
+              if not ped or ped == 0 or not DoesEntityExist(ped) or not spot then return false end
+              NetworkRequestControlOfEntity(ped)
+              SetEntityAsMissionEntity(ped, true, true)
+              ClearPedTasksImmediately(ped)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              SetPedKeepTask(ped, true)
+              TaskGoStraightToCoord(ped, spot.x, spot.y, spot.z, 1.0, tonumber(timeoutMs) or 7000, tonumber(heading) or GetEntityHeading(ped), 0.2)
+              local reached = duiAwaitPedNear(ped, spot, 1.35, timeoutMs)
+              if (not reached) and allowWarp and DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false) then
+                SetEntityCoordsNoOffset(ped, spot.x, spot.y, spot.z, false, false, false)
+                reached = true
+              end
+              if reached and DoesEntityExist(ped) then
+                ClearPedTasks(ped)
+                SetEntityHeading(ped, tonumber(heading) or GetEntityHeading(ped))
+                TaskStandStill(ped, 1500)
+              end
+              return reached
+            end
+
+            function duiEnsureSubjectOnFoot(ped, pedKey)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              if not IsPedInAnyVehicle(ped, false) then return true end
+              local info = pedData[pedKey] or {}
+              info.allowVehicleExitUntil = GetGameTimer() + 6000
+              info.preventVehicleReseatUntil = GetGameTimer() + 10000
+              pedData[pedKey] = info
+              local veh = GetVehiclePedIsIn(ped, false)
+              if veh and veh ~= 0 and DoesEntityExist(veh) then
+                NetworkRequestControlOfEntity(veh)
+                SetVehicleDoorsLocked(veh, 1)
+              end
+              if not forcePedExitVehicle(ped, veh) then
+                ClearPedTasksImmediately(ped)
+                TaskLeaveVehicle(ped, veh or 0, 0)
+                Citizen.Wait(1200)
+              end
+              local started = GetGameTimer()
+              while DoesEntityExist(ped) and IsPedInAnyVehicle(ped, false) and (GetGameTimer() - started) < 4500 do
+                Citizen.Wait(100)
+              end
+              return DoesEntityExist(ped) and not IsPedInAnyVehicle(ped, false)
+            end
+
+            function duiPrepareFieldSubject(ped, pedKey, info, label)
+              if not duiRequireOnFootAndUncuffed(ped, info, label) then return nil end
+              if not duiEnsureSubjectOnFoot(ped, pedKey) then
+                notify('dui_exit_fail_' .. tostring(label), label or 'Field Test', 'Could not get the subject out of the vehicle for the field test.', 'error', 'triangle-exclamation', '#E53E3E')
+                return nil
+              end
+              local spot, heading = duiGetSpotNearOfficer(true)
+              if not duiMovePedToSpot(ped, spot, heading, 7000, true) then
+                notify('dui_move_fail_' .. tostring(label), label or 'Field Test', 'Could not position the subject for the field test.', 'error', 'triangle-exclamation', '#E53E3E')
+                return nil
+              end
+              TaskTurnPedToFaceEntity(ped, PlayerPedId(), 1500)
+              TaskStandStill(ped, 2000)
+              return { spot = spot, heading = heading }
+            end
+
+            function duiPerformMovementTestVisual(ped, prep, kind, result, profile)
+              if not ped or ped == 0 or not DoesEntityExist(ped) or not prep or not prep.spot then return false end
+              local speed = 1.0
+              local status = result and tostring(result.status or '') or ''
+              if status == 'FAIL' or status == 'WARN' or status == 'PARTIAL' then speed = 0.72 end
+              local usedClip = duiApplyImpairedMovementVisual(ped, profile, result)
+              local distance = (kind == 'walk_turn') and 6.0 or 4.0
+              local dx, dy = duiHeadingForward(prep.heading)
+              local outPos = vector3(prep.spot.x + dx * distance, prep.spot.y + dy * distance, prep.spot.z)
+              ClearPedTasksImmediately(ped)
+              TaskGoStraightToCoord(ped, outPos.x, outPos.y, outPos.z, speed, 7000, prep.heading, 0.1)
+              local reachedOut = duiAwaitPedNear(ped, outPos, 1.35, 7000)
+              if kind == 'walk_turn' and reachedOut and DoesEntityExist(ped) then
+                ClearPedTasks(ped)
+                SetEntityHeading(ped, (prep.heading + 180.0) % 360.0)
+                Citizen.Wait(700)
+                TaskGoStraightToCoord(ped, prep.spot.x, prep.spot.y, prep.spot.z, speed, 7000, (prep.heading + 180.0) % 360.0, 0.1)
+                duiAwaitPedNear(ped, prep.spot, 1.35, 7000)
+              end
+              if DoesEntityExist(ped) then
+                ClearPedTasks(ped)
+                SetEntityHeading(ped, prep.heading)
+                TaskStandStill(ped, 1500)
+                if usedClip then
+                  Citizen.Wait(250)
+                  duiResetMovementVisual(ped)
+                end
+              end
+              return true
+            end
+
+            function duiPerformStationaryTestVisual(ped, prep, kind, durationMs, result, profile)
+              if not ped or ped == 0 or not DoesEntityExist(ped) or not prep then return false end
+              local usedClip = duiApplyImpairedMovementVisual(ped, profile, result)
+              ClearPedTasks(ped)
+              SetEntityHeading(ped, prep.heading)
+              TaskTurnPedToFaceEntity(ped, PlayerPedId(), 1000)
+              if kind == 'one_leg' and loadAnimDictTimed('amb@world_human_stand_impatient@male@no_sign@base', 1200) then
+                TaskPlayAnim(ped, 'amb@world_human_stand_impatient@male@no_sign@base', 'base', 4.0, -4.0, tonumber(durationMs) or 5000, 49, 0.0, false, false, false)
+              elseif kind == 'hgn' then
+                TaskLookAtEntity(ped, PlayerPedId(), tonumber(durationMs) or 5000, 2048, 3)
+                TaskStandStill(ped, tonumber(durationMs) or 5000)
+              else
+                TaskStandStill(ped, tonumber(durationMs) or 5000)
+              end
+              Citizen.Wait(math.min(tonumber(durationMs) or 5000, 2500))
+              if usedClip then duiResetMovementVisual(ped) end
+              return true
+            end
+
+            function duiPrepareChemicalSubject(ped, pedKey)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              local player = PlayerPedId()
+              NetworkRequestControlOfEntity(ped)
+              SetEntityAsMissionEntity(ped, true, true)
+              SetBlockingOfNonTemporaryEvents(ped, true)
+              SetPedKeepTask(ped, true)
+              if IsPedInAnyVehicle(ped, false) then
+                local info = pedData[pedKey] or {}
+                info.allowVehicleExitUntil = GetGameTimer() + 3000
+                pedData[pedKey] = info
+                holdPedAttention(ped, true)
+                TaskTurnPedToFaceEntity(ped, player, 1000)
+                TaskLookAtEntity(ped, player, 3500, 2048, 3)
+                return true
+              end
+              ClearPedTasksImmediately(ped)
+              local playerCoords = GetEntityCoords(player)
+              local pedCoords = GetEntityCoords(ped)
+              local dist = #(pedCoords - playerCoords)
+              if dist > 3.0 then
+                local spot, heading = duiGetSpotNearOfficer(false)
+                if not duiMovePedToSpot(ped, spot, heading, 5000, true) then
+                  local fx, fy, fz = table.unpack(GetOffsetFromEntityInWorldCoords(player, 0.65, 1.35, 0.0))
+                  local fallback = vector3(fx, fy, fz)
+                  local okGround, gz = GetGroundZFor_3dCoord(fallback.x, fallback.y, fallback.z + 3.0, false)
+                  if okGround then fallback = vector3(fallback.x, fallback.y, gz + 0.03) end
+                  SetEntityCoordsNoOffset(ped, fallback.x, fallback.y, fallback.z, false, false, false)
+                  SetEntityHeading(ped, (GetEntityHeading(player) + 180.0) % 360.0)
+                end
+              else
+                TaskTurnPedToFaceEntity(ped, player, 1200)
+              end
+              TaskLookAtEntity(ped, player, 2500, 2048, 3)
+              TaskStandStill(ped, 2500)
+              return true
+            end
+
+            function duiApplyPostTestControl(ped, pedKey)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return end
+              local info = pedData[pedKey] or nil
+              if info and shouldKeepPedSeated(info) then
+                enforcePedRemainSeated(ped, pedKey)
+                return
+              end
+              holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
+            end
+
+            function duiUniqueAppend(target, values)
+              local seen = {}
+              for i = 1, #target do seen[target[i]] = true end
+              for i = 1, #values do
+                local value = tostring(values[i])
+                if not seen[value] then
+                  target[#target + 1] = value
+                  seen[value] = true
+                end
+              end
+            end
+
+            function duiBuildObservationList(info, profile)
+              local observations = {}
+              observations[#observations + 1] = profile.odor
+              observations[#observations + 1] = profile.speech
+              observations[#observations + 1] = profile.eyes
+              observations[#observations + 1] = profile.balance
+              observations[#observations + 1] = profile.admission
+              if profile.openContainer then observations[#observations + 1] = 'open container indicators present in vehicle area' end
+              if profile.drugEntry and profile.drugEntry.observation then
+                duiUniqueAppend(observations, duiPick(profile.drugEntry.observation, math.random(1, math.min(2, #profile.drugEntry.observation))))
+              end
+              if profile.medicalIssue then observations[#observations + 1] = 'subject mentions a possible prior injury that could affect balance' end
+              return observations
+            end
+
+            function duiFieldClueCount(profile, kind)
+              local count = 0
+              local alcohol = tonumber(profile.alcoholLevel or 0.0) or 0.0
+              if kind == 'hgn' then
+                if alcohol >= 0.08 then count = count + math.random(4, 6)
+                elseif alcohol >= 0.05 then count = count + math.random(2, 4)
+                elseif alcohol >= 0.03 then count = count + math.random(1, 2)
+                end
+                if profile.drugEntry and (profile.drugEntry.name == 'Methamphetamine' or profile.drugEntry.name == 'Cocaine' or profile.drugEntry.name == 'Benzodiazepines') then
+                  count = count + math.random(1, 2)
+                end
+                if count == 0 and profile.nervous and math.random() < 0.20 then count = 1 end
+                return math.min(count, 6)
+              end
+
+              if alcohol >= 0.12 then count = count + math.random(3, 4)
+              elseif alcohol >= 0.08 then count = count + math.random(2, 3)
+              elseif alcohol >= 0.05 then count = count + math.random(1, 2)
+              elseif alcohol > 0.0 and math.random() < 0.25 then count = 1 end
+              if profile.drugEntry then count = count + math.random(1, 2) end
+              if profile.medicalIssue and math.random() < 0.70 then count = count + 1 end
+              if profile.nervous and count == 0 and math.random() < 0.40 then count = 1 end
+              if kind == 'one_leg' then return math.min(count, 4) end
+              if kind == 'line_walk' then return math.min(count, 5) end
+              return math.min(count, 8)
+            end
+
+            function duiEvaluateFieldTest(kind, profile)
+              local pools = {
+                walk_turn = {
+                  'starts before instructions are finished',
+                  'misses heel-to-toe on multiple steps',
+                  'steps off the line',
+                  'uses arms for balance',
+                  'makes an improper turn',
+                  'takes the wrong number of steps',
+                  'stops while walking',
+                  'cannot maintain starting position',
+                },
+                line_walk = {
+                  'drifts off the line',
+                  'looks down constantly to keep balance',
+                  'stumbles during straight-line walk',
+                  'uses arms to steady self',
+                  'takes uneven short steps',
+                },
+                one_leg = {
+                  'puts foot down early',
+                  'sways while balancing',
+                  'uses arms for balance',
+                  'hops to maintain balance',
+                },
+                hgn = {
+                  'lack of smooth pursuit observed',
+                  'distinct nystagmus at maximum deviation',
+                  'onset of nystagmus prior to 45 degrees',
+                  'poor convergence noted',
+                  'unequal tracking between eyes',
+                  'delayed pupil response observed',
+                }
+              }
+              local thresholds = {
+                walk_turn = { fail = 2, partial = 1, max = 8 },
+                line_walk = { fail = 2, partial = 1, max = 5 },
+                one_leg = { fail = 2, partial = 1, max = 4 },
+                hgn = { fail = 4, partial = 2, max = 6 },
+              }
+              local labelMap = {
+                walk_turn = 'Walk-and-Turn',
+                line_walk = 'Line Walk',
+                one_leg = 'One-Leg Stand',
+                hgn = 'Eye Test / HGN',
+              }
+              local count = duiFieldClueCount(profile, kind)
+              local cfg = thresholds[kind] or thresholds.walk_turn
+              local clues = duiPick(pools[kind] or pools.walk_turn, count)
+              local status = 'PASS'
+              if count >= cfg.fail then status = 'FAIL'
+              elseif count >= cfg.partial then status = 'PARTIAL' end
+              local summary = string.format('%s: %s (%d clue%s)', labelMap[kind] or kind, status, count, count == 1 and '' or 's')
+              if profile.medicalIssue and count > 0 then
+                summary = summary .. '. Subject also reports a possible balance-affecting injury.'
+              end
+              return {
+                kind = kind,
+                status = status,
+                clueCount = count,
+                clues = clues,
+                summary = summary,
+                label = labelMap[kind] or kind,
+              }
+            end
+
+            function duiEvaluateChemicalTest(kind, profile)
+              if kind == 'drug' then
+                if profile.drugEntry then
+                  return {
+                    kind = kind,
+                    status = 'POSITIVE',
+                    value = profile.drugEntry.name,
+                    summary = ('Drug Test: POSITIVE (%s)'):format(profile.drugEntry.result),
+                    label = 'Drug Test',
+                    detailLines = {
+                      profile.drugEntry.result,
+                      'Roadside oral fluid result is presumptive only and should be confirmed by lab if needed.'
+                    }
+                  }
+                end
+                return {
+                  kind = kind,
+                  status = 'NEGATIVE',
+                  value = 'Negative',
+                  summary = 'Drug Test: NEGATIVE',
+                  label = 'Drug Test',
+                  detailLines = { 'No common roadside drug indicator registered on the screen.' }
+                }
+              end
+
+              local value = tonumber((kind == 'breathalyzer' and profile.roadsideBrAC) or profile.evidentialBAC or 0.0) or 0.0
+              value = duiClamp(value, 0.0, 0.240)
+              local status = 'PASS'
+              if value >= 0.08 then status = 'FAIL'
+              elseif value >= 0.05 then status = 'WARN' end
+              local label = (kind == 'breathalyzer') and 'Breathalyzer (PBT)' or 'BAC Test'
+              local summary = string.format('%s: %s (%.3f BAC)', label, status, value)
+              local detail = {}
+              if value >= 0.08 then
+                detail[#detail + 1] = 'Result is above the common per se alcohol limit.'
+              elseif value >= 0.05 then
+                detail[#detail + 1] = 'Alcohol detected below common per se limit but still relevant for impairment.'
+              else
+                detail[#detail + 1] = 'Low / no measurable alcohol detected.'
+              end
+              if profile.drugEntry and value < 0.08 then
+                detail[#detail + 1] = 'Observed impairment may be better explained by drug indicators than alcohol level alone.'
+              end
+              return {
+                kind = kind,
+                status = status,
+                value = duiRound(value, 3),
+                summary = summary,
+                label = label,
+                detailLines = detail,
+              }
+            end
+
+            function duiProbableCause(caseData)
+              local points = 0
+              local reasons = {}
+              if caseData and caseData.observations and #caseData.observations > 0 then
+                points = points + 1
+                reasons[#reasons + 1] = 'objective roadside observations documented'
+              end
+              if caseData and caseData.tests then
+                for kind, result in pairs(caseData.tests) do
+                  if result and (result.status == 'FAIL' or result.status == 'POSITIVE') then
+                    points = points + 2
+                    reasons[#reasons + 1] = tostring(result.label or kind) .. ' indicated impairment'
+                  elseif result and (result.status == 'WARN' or result.status == 'PARTIAL') then
+                    points = points + 1
+                    reasons[#reasons + 1] = tostring(result.label or kind) .. ' showed concerning clues'
+                  elseif result and result.status == 'REFUSED' then
+                    points = points + 2
+                    reasons[#reasons + 1] = tostring(result.label or kind) .. ' was refused'
+                  end
+                end
+              end
+              return points >= 3, reasons, points
+            end
+
+            function doDuiObservations()
+              local ped, pedKey, info = duiGetTargetPed(true)
+              if not ped then return end
+              local profile = duiGetProfile(ped, pedKey, info)
+              local duiCase = duiGetCase(info)
+              local inVehicle = IsPedInAnyVehicle(ped, false)
+              if inVehicle then
+                holdPedAttention(ped, true)
+                notify('dui_obs_vehicle', 'Roadside Observations', 'Observing the subject from the driver window / roadside position.', 'inform', 'car-side', '#4299E1')
+              else
+                local prep = duiPrepareFieldSubject(ped, pedKey, info, 'Roadside Observations')
+                if not prep then return end
+              end
+              duiPlayOfficerAnimForTest('observations', 4500)
+              if not duiRunProgress('Documenting roadside observations', 4500, 'note') then
+                return notify('dui_obs_cancel', 'Canceled', 'Roadside observation check canceled.', 'warning', 'ban', '#DD6B20')
+              end
+              local observations = duiBuildObservationList(info, profile)
+              duiCase.observations = observations
+              duiCase.notes[#duiCase.notes + 1] = 'Initial observations completed.'
+              local summary = table.concat(observations, ' • ')
+              notify('dui_obs_done', 'Roadside Observations', summary, 'inform', 'eye', '#4299E1')
+              duiSaveRecord(pedKey, info, 'Roadside Observations', duiJoinLines(observations), 'dui_observation')
+              duiApplyPostTestControl(ped, pedKey)
+            end
+
+            function doDuiTest(kind)
+              local ped, pedKey, info = duiGetTargetPed(true)
+              if not ped then return end
+              local profile = duiGetProfile(ped, pedKey, info)
+              local duiCase = duiGetCase(info)
+              local labels = {
+                walk_turn = 'Walk-and-Turn',
+                line_walk = 'Line Walk',
+                one_leg = 'One-Leg Stand',
+                hgn = 'Eye Test / HGN',
+                breathalyzer = 'Breathalyzer (PBT)',
+                bac = 'BAC Test',
+                drug = 'Drug Test',
+              }
+              local durations = {
+                walk_turn = 6500,
+                line_walk = 5000,
+                one_leg = 5500,
+                hgn = 4500,
+                breathalyzer = 4200,
+                bac = 6000,
+                drug = 6500,
+              }
+              local label = labels[kind] or tostring(kind)
+              local fieldTest = (kind == 'walk_turn' or kind == 'line_walk' or kind == 'one_leg' or kind == 'hgn')
+              local chemical = (kind == 'breathalyzer' or kind == 'bac' or kind == 'drug')
+              local prep = nil
+              local result = nil
+
+              if fieldTest then
+                prep = duiPrepareFieldSubject(ped, pedKey, info, label)
+                if not prep then return end
+                local instructionText = {
+                  walk_turn = 'Subject is being positioned for a walk-and-turn test.',
+                  line_walk = 'Subject is being positioned for a straight-line walk test.',
+                  one_leg = 'Subject is being positioned for a one-leg stand.',
+                  hgn = 'Subject is being positioned for the eye tracking test.',
+                }
+                notify('dui_instr_' .. tostring(kind), label, instructionText[kind] or 'Subject positioned for testing.', 'inform', 'person-walking', '#4299E1')
+              elseif chemical then
+                if not duiPrepareChemicalSubject(ped, pedKey) then
+                  return notify('dui_chem_prep_fail_' .. tostring(kind), label, 'Could not position the subject for this chemical test.', 'error', 'triangle-exclamation', '#E53E3E')
+                end
+              end
+
+              if chemical and not duiCase.impliedConsentRead then
+                duiCase.impliedConsentRead = true
+                duiCase.notes[#duiCase.notes + 1] = 'Implied consent warning read before chemical testing.'
+                notify('dui_consent_read', 'Implied Consent', 'You advised the subject that refusing a chemical test may be used against them.', 'inform', 'book', '#4299E1')
+                Citizen.Wait(300)
+              end
+
+              if chemical and duiChemicalRefusal(info, profile, kind) then
+                duiCase.refusalCount = (duiCase.refusalCount or 0) + 1
+                local refusal = {
+                  kind = kind,
+                  label = label,
+                  status = 'REFUSED',
+                  summary = label .. ': REFUSED',
+                  detailLines = { 'Subject verbally refused the requested chemical test.' }
+                }
+                duiCase.tests[kind] = refusal
+                playSimpleConversationAnim(ped, 'refuse')
+                notify('dui_refused_' .. kind, label, 'Subject refused the test.', 'warning', 'triangle-exclamation', '#DD6B20')
+                duiSaveRecord(pedKey, info, label .. ' Refusal', 'Subject refused the requested test after being advised.', 'dui_refusal')
+                duiApplyPostTestControl(ped, pedKey)
+                return
+              end
+
+              if fieldTest then
+                result = duiEvaluateFieldTest(kind, profile)
+                if kind == 'walk_turn' or kind == 'line_walk' then
+                  duiPerformMovementTestVisual(ped, prep, kind, result, profile)
+                elseif kind == 'one_leg' then
+                  duiPerformStationaryTestVisual(ped, prep, kind, durations[kind] or 5500, result, profile)
+                elseif kind == 'hgn' then
+                  duiPerformStationaryTestVisual(ped, prep, kind, durations[kind] or 4500, result, profile)
+                end
+              else
+                result = duiEvaluateChemicalTest(kind, profile)
+                duiPlayOfficerAnimForTest(kind, durations[kind] or 4500)
+                duiPlaySubjectChemicalVisual(kind, ped, (durations[kind] or 4500) + 600)
+              end
+
+              if not duiRunProgress('Running ' .. label, durations[kind] or 4500, nil) then
+                duiApplyPostTestControl(ped, pedKey)
+                return notify('dui_test_cancel_' .. tostring(kind), 'Canceled', label .. ' canceled.', 'warning', 'ban', '#DD6B20')
+              end
+              duiCase.tests[kind] = result
+              duiCase.notes[#duiCase.notes + 1] = result.summary
+
+              local descriptionLines = { result.summary }
+              if result.clues and #result.clues > 0 then
+                for i = 1, #result.clues do descriptionLines[#descriptionLines + 1] = '- ' .. tostring(result.clues[i]) end
+              end
+              if result.detailLines and #result.detailLines > 0 then
+                for i = 1, #result.detailLines do descriptionLines[#descriptionLines + 1] = '- ' .. tostring(result.detailLines[i]) end
+              end
+
+              notify('dui_result_' .. tostring(kind), label, result.summary, (result.status == 'FAIL' or result.status == 'POSITIVE') and 'error' or ((result.status == 'WARN' or result.status == 'PARTIAL') and 'warning' or 'success'), chemical and 'vial-circle-check' or 'clipboard-check', (result.status == 'FAIL' or result.status == 'POSITIVE') and '#E53E3E' or '#38A169')
+              duiSaveRecord(pedKey, info, label, table.concat(descriptionLines, '\n'), chemical and 'dui_chemical' or 'dui_field_test')
+              duiApplyPostTestControl(ped, pedKey)
+            end
+
+            function showDuiSummary()
+              local ped, pedKey, info = duiGetTargetPed(true)
+              if not ped then return end
+              local profile = duiGetProfile(ped, pedKey, info)
+              local duiCase = duiGetCase(info)
+              local observations = duiCase.observations or {}
+              local summaryParts = { duiMakeSummaryHeader(info, profile) }
+              if #observations > 0 then
+                summaryParts[#summaryParts + 1] = '## Observations\n' .. duiJoinLines(observations)
+              else
+                summaryParts[#summaryParts + 1] = '## Observations\n- None documented yet.'
+              end
+
+              local orderedKeys = {'walk_turn', 'line_walk', 'one_leg', 'hgn', 'breathalyzer', 'bac', 'drug'}
+              local testLines = {}
+              for i = 1, #orderedKeys do
+                local key = orderedKeys[i]
+                local result = duiCase.tests[key]
+                if result then
+                  testLines[#testLines + 1] = '- ' .. tostring(result.summary)
+                  if result.clues then
+                    for j = 1, #result.clues do testLines[#testLines + 1] = '  • ' .. tostring(result.clues[j]) end
+                  end
+                  if result.detailLines then
+                    for j = 1, #result.detailLines do testLines[#testLines + 1] = '  • ' .. tostring(result.detailLines[j]) end
+                  end
+                end
+              end
+              summaryParts[#summaryParts + 1] = '## Test Results\n' .. (#testLines > 0 and table.concat(testLines, '\n') or '- No tests completed yet.')
+
+              local probableCause, reasons, points = duiProbableCause(duiCase)
+              summaryParts[#summaryParts + 1] = ('## Probable Cause\n- Assessment: %s\n- Score: %d\n%s'):format(
+                probableCause and 'Probable cause for impairment is present.' or 'Current findings are inconclusive / weak.',
+                tonumber(points or 0) or 0,
+                (#reasons > 0 and duiJoinLines(reasons) or '- No supporting reasons logged yet.')
+              )
+
+              local content = table.concat(summaryParts, '\n\n')
+              duiCase.lastSummaryAt = duiNow()
+              if lib and lib.alertDialog then
+                lib.alertDialog({
+                  header = 'DUI / SFST Summary',
+                  content = content,
+                  centered = true,
+                  cancel = false,
+                })
+              else
+                notify('dui_summary', 'DUI Summary', content:gsub('\n', ' | '), probableCause and 'warning' or 'inform', 'clipboard-check', '#4299E1')
+              end
+              duiSaveRecord(pedKey, info, 'DUI Investigation Summary', content, 'dui_summary')
+            end
+
             function doArrest()
               dprint("doArrest called")
               local ped, nid = resolveLastPed()
@@ -3239,6 +6840,10 @@ local stopEnabled, debugEnabled = true, true
                 dprint("doArrest: no ped resolved")
                 return notify("arrest_no","No Ped","None stopped.",'error','handcuffs','#E53E3E')
               end
+
+              local arrestKey = tostring(tonumber(nid) or nid or safePedToNet(ped) or lastPedNetId or ped)
+              lastPedNetId = arrestKey
+              lastPedEntity = ped
 
               safeProgressBar({ duration=2000, label="Arresting" })
 
@@ -3249,35 +6854,44 @@ local stopEnabled, debugEnabled = true, true
                 return notify("arrest_no_exist","No Ped","Target no longer exists.",'error','handcuffs','#E53E3E')
               end
 
+              playSimpleConversationAnim(ped, "refuse")
               NetworkRequestControlOfEntity(ped); SetEntityAsMissionEntity(ped,true,true)
               RequestAnimDict("mp_arresting")
               while not HasAnimDictLoaded("mp_arresting") do Citizen.Wait(0) end
               TaskPlayAnim(ped,"mp_arresting","idle",8.0,-8.0,3000,49,0); Citizen.Wait(3000)
 
-              SetEnableHandcuffs(ped, true)
-              SetBlockingOfNonTemporaryEvents(ped, true)
-              SetPedCanRagdoll(ped, false)
+              applyCuffedPedState(ped, arrestKey, false)
               holdPedAttention(ped, IsPedInAnyVehicle(ped, false))
 
               local fullName = nil
               local dob = ""
-              if lastPedNetId and pedData[tostring(lastPedNetId)] then
-                fullName = pedData[tostring(lastPedNetId)].name
-                dob = pedData[tostring(lastPedNetId)].dob or ""
+              if pedData[arrestKey] then
+                fullName = pedData[arrestKey].name
+                dob = pedData[arrestKey].dob or ""
               else
-                fullName = getPedName(lastPedNetId)
+                fullName = getPedName(arrestKey)
               end
 
-              TriggerServerEvent('police:arrestPed', lastPedNetId, fullName, dob)
+              local arrestContext = {
+                wanted = pedData[arrestKey] and pedData[arrestKey].wanted == true or false,
+                suspended = pedData[arrestKey] and pedData[arrestKey].suspended == true or false,
+                illegalItems = pedData[arrestKey] and pedData[arrestKey].hasIllegalItems == true or false,
+                drunk = pedData[arrestKey] and pedData[arrestKey].isDrunk == true or false,
+                high = pedData[arrestKey] and pedData[arrestKey].isHigh == true or false,
+                licenseStatus = pedData[arrestKey] and pedData[arrestKey].licenseStatus or '',
+                lastIdOutcome = pedData[arrestKey] and pedData[arrestKey].lastIdOutcome or '',
+                hadVehicleStop = pedData[arrestKey] and pedData[arrestKey].pulledProtected == true or false
+              }
+              TriggerServerEvent('police:arrestPed', arrestKey, fullName, dob, arrestContext)
 
-              notify("arrest_ok","Arrest","Ped cuffed. Removing from world and logged.",'success','police-badge','#38A169')
+              notify("arrest_ok","Arrest","Ped cuffed. Removing from world and logged.",'success','shield-halved','#38A169')
 
               Citizen.CreateThread(function()
                 Citizen.Wait(500)
 
                 if not DoesEntityExist(ped) then
-                  lastPedNetId = nil
-                  lastPedEntity = nil
+                  if tostring(lastPedNetId or '') == arrestKey then lastPedNetId = nil end
+                  if lastPedEntity == ped then lastPedEntity = nil end
                   dprint("doArrest: ped disappeared before removal")
                   return
                 end
@@ -3303,11 +6917,19 @@ local stopEnabled, debugEnabled = true, true
                   DeletePed(ped)
                 end
 
-                if lastPedNetId then pedData[tostring(lastPedNetId)] = nil end
-                lastPedNetId = nil
-                lastPedEntity = nil
+                markPedCuffedState(ped, arrestKey, false)
+                clearTrackedCuffStateForPed(ped, arrestKey)
+                if draggedPed == ped then draggedPed = nil end
+                isDragging = false
+                local arrestSendNet = safePedToNet(ped) or tonumber(arrestKey) or arrestKey
+                if arrestSendNet and tostring(arrestSendNet) ~= '' then
+                  TriggerServerEvent('police:cuffPed', tostring(arrestSendNet), false)
+                end
+                pedData[arrestKey] = nil
+                if tostring(lastPedNetId or '') == arrestKey then lastPedNetId = nil end
+                if lastPedEntity == ped then lastPedEntity = nil end
 
-                notify("arrest_final","Arrest Complete","Ped removed and arrest logged.",'success','police-badge','#38A169')
+                notify("arrest_final","Arrest Complete","Ped removed and arrest logged.",'success','shield-halved','#38A169')
               end)
             end
 
@@ -3325,42 +6947,36 @@ local stopEnabled, debugEnabled = true, true
                 return notify("rel_no_exist","No Ped","Target no longer exists.",'error','unlock','#E53E3E')
               end
 
-              NetworkRequestControlOfEntity(ped)
-              ClearPedTasksImmediately(ped)
-              releasePedAttention(ped)
+              local pedKey = tostring(nid or safePedToNet(ped) or ped)
+              uncuffPedOnly(ped, pedKey, false)
+              releasePedAttention(ped, true)
+              FreezeEntityPosition(ped, false)
 
-              local netId = safePedToNet(ped)
-              if netId then
-                setPedProtected(netId, false)
-                markPulledInVehicle(netId, false)
-                if pedData[tostring(netId)] then pedData[tostring(netId)].forcedStop = nil end
+              if pedData[pedKey] then
+                pedData[pedKey].forcedStop = nil
+                pedData[pedKey].pulledProtected = false
+                pedData[pedKey].pulledInVehicle = false
               end
+              setPedProtected(pedKey, false)
+              markPulledInVehicle(pedKey, false)
 
               SetEntityAsMissionEntity(ped,false,false)
 
               if IsPedInAnyVehicle(ped, false) then
-                SetBlockingOfNonTemporaryEvents(ped, false)
-                SetPedKeepTask(ped, false)
-                if IsPedInAnyVehicle(ped, false) then
-                  local veh = GetVehiclePedIsIn(ped, false)
-                  if DoesEntityExist(veh) then
-                    NetworkRequestControlOfEntity(ped)
-                    NetworkRequestControlOfEntity(veh)
-                    SetVehicleEngineOn(veh, true, true, true)
-                    SetVehicleHandbrake(veh, false)
-                    SetVehicleDoorsLocked(veh, 1)
-                    TaskVehicleDriveWander(ped, veh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
-                  end
+                local veh = GetVehiclePedIsIn(ped, false)
+                if DoesEntityExist(veh) then
+                  NetworkRequestControlOfEntity(ped)
+                  NetworkRequestControlOfEntity(veh)
+                  SetVehicleEngineOn(veh, true, true, true)
+                  SetVehicleHandbrake(veh, false)
+                  SetVehicleDoorsLocked(veh, 1)
+                  TaskVehicleDriveWander(ped, veh, Config.Wander.driveSpeed, Config.Wander.driveStyle)
                 end
               else
-                TaskWanderStandard(ped, 10.0, 10)
+                sendPedOnReleaseWalk(ped)
               end
 
-              SetEnableHandcuffs(ped, false)
-              SetPedCanRagdoll(ped, true)
-              SetPedKeepTask(ped, false)
-
-              notify("rel_ok","Released","Ped is free.",'success','unlock','#38A169')
+              notify("rel_ok","Released","Ped uncuffed and sent on their way.",'success','unlock','#38A169')
               lastPedNetId = nil
               lastPedEntity = nil
             end
@@ -3393,14 +7009,11 @@ local stopEnabled, debugEnabled = true, true
                     SetVehicleDoorsLocked(veh, 1)
                     SetPedCanRagdoll(ped, true)
 
-                    SetEnableHandcuffs(ped, false)
-                    SetBlockingOfNonTemporaryEvents(ped, false)
-                    SetPedCanRagdoll(ped, true)
-                    SetPedKeepTask(ped, false)
+                    local netId_local = safePedToNet(ped) or tostring(ped)
+                    uncuffPedOnly(ped, netId_local, false)
                     Citizen.Wait(Config.Timings.shortWait)
                     SetPedKeepTask(ped, true)
 
-                    local netId_local = safePedToNet(ped) or tostring(ped)
                     if pedData and pedData[tostring(netId_local)] and (pedData[tostring(netId_local)].wanted or pedData[tostring(netId_local)].suspended) then
                       if not attemptPedAttack(ped, veh, netId_local) then
                         startFleeDrive(ped, veh)
@@ -3452,6 +7065,16 @@ local stopEnabled, debugEnabled = true, true
               if #(GetEntityCoords(ped) - GetEntityCoords(PlayerPedId())) > 1.5 then
                 dprint("tryCuffPed: too far")
                 return notify("cuff_far","Too Far","Get closer.",'error','location-arrow','#E53E3E')
+              end
+
+              local existingKey = tostring(nid or lastPedNetId or safePedToNet(ped) or ped)
+              local alreadyCuffed, canonicalExistingKey = isPedActuallyCuffed(ped, existingKey)
+              if alreadyCuffed then
+                uncuffPedOnly(ped, canonicalExistingKey or existingKey, true)
+                notify("uncuff_ok","Uncuffed","Ped handcuffs removed.",'success','unlock','#38A169')
+                lastPedEntity = ped
+                lastPedNetId = canonicalExistingKey or existingKey
+                return
               end
 
               notify("cuff_start","Cuffing…","Please wait.",'inform','handcuffs','#4299E1')
@@ -3523,59 +7146,172 @@ local stopEnabled, debugEnabled = true, true
 
               end
 
-              SetEnableHandcuffs(ped, true)
-              SetBlockingOfNonTemporaryEvents(ped, true)
-              SetPedCanRagdoll(ped, false)
+              local cuffKey = getPedCanonicalCuffKey(ped, nid or lastPedNetId or safePedToNet(ped) or ped)
+              applyCuffedPedState(ped, cuffKey, true)
+              if IsPedInAnyVehicle(ped, false) then
+                rememberDetainedVehicleState(ped, cuffKey, GetVehiclePedIsIn(ped, false))
+              else
+                pedData[cuffKey] = pedData[cuffKey] or {}
+                pedData[cuffKey].detainedVehicleNet = nil
+                pedData[cuffKey].detainedSeat = nil
+                pedData[cuffKey].pulledInVehicle = false
+                pedData[cuffKey].pulledProtected = false
+                pedData[cuffKey].forcedStop = nil
+                pedData[cuffKey].preventVehicleReseatUntil = GetGameTimer() + 15000
+              end
 
               notify("cuff_ok","Cuffed","Ped is handcuffed.",'success','lock','#38A169')
 
               draggedPed = ped
+              cachePedReference(ped, cuffKey)
+              lastPedEntity = ped
+              lastPedNetId = cuffKey
+              lastCuffedPedEntity = ped
+              lastCuffedPedNetId = cuffKey
               isDragging = false
 
-              local sendNet = nil
-              if lastPedNetId then
-                sendNet = lastPedNetId
-              else
-                local maybe = safePedToNet(ped)
-                if maybe and maybe ~= 0 then sendNet = maybe end
+              local sendNet = safePedToNet(ped)
+              if not sendNet or sendNet == 0 then
+                sendNet = tonumber(lastPedNetId or '') or lastPedNetId
               end
 
               dprint("tryCuffPed: sending server event police:cuffPed with", tostring(sendNet))
-              TriggerServerEvent('police:cuffPed', sendNet)
+              if sendNet and tostring(sendNet) ~= '' then
+                TriggerServerEvent('police:cuffPed', sendNet)
+              end
+            end
+
+
+            local function placeCuffedPedIntoVehicle(ped, veh, seatIdx, netId)
+              if not ped or ped == 0 or not DoesEntityExist(ped) then return false end
+              if not veh or veh == 0 or not DoesEntityExist(veh) then return false end
+
+              NetworkRequestControlOfEntity(ped)
+              NetworkRequestControlOfEntity(veh)
+
+              local player = PlayerPedId()
+              local driverPed = GetPedInVehicleSeat(veh, -1)
+              local playerIsDriver = (driverPed ~= 0 and driverPed == player)
+              local engineWasRunning = GetIsVehicleEngineRunning(veh)
+
+              SetVehicleDoorsLocked(veh, 1)
+
+              if isDragging or IsEntityAttached(ped) then
+                DetachEntity(ped, true, false)
+                isDragging = false
+              end
+
+              local pedKey = cachePedReference(ped, netId or safePedToNet(ped) or tostring(ped))
+              local seatDoor = (seatIdx == 1) and 2 or ((seatIdx == 2) and 3 or 1)
+
+              ClearPedTasksImmediately(ped)
+              ClearPedSecondaryTask(ped)
+              SetEntityCollision(ped, true, true)
+              FreezeEntityPosition(ped, false)
+              applyCuffedPedState(ped, pedKey, true)
+
+              if seatDoor >= 0 then
+                SetVehicleDoorOpen(veh, seatDoor, false, false)
+              end
+
+              local seatingCfg = (Config and Config.PedCustody and Config.PedCustody.seating) or {}
+              if seatingCfg.preferTaskEnterWarp ~= false then
+                TaskEnterVehicle(ped, veh, 1000, seatIdx, 2.0, 16, 0)
+                Citizen.Wait(tonumber(seatingCfg.directEnterWaitMs) or 350)
+              end
+
+              if not (IsPedInVehicle(ped, veh, false) and GetPedInVehicleSeat(veh, seatIdx) == ped) and seatingCfg.fallbackToTaskWarp ~= false then
+                ClearPedTasksImmediately(ped)
+                TaskWarpPedIntoVehicle(ped, veh, seatIdx)
+                Citizen.Wait(75)
+              end
+
+              if not (IsPedInVehicle(ped, veh, false) and GetPedInVehicleSeat(veh, seatIdx) == ped) and seatingCfg.fallbackToSetPedIntoVehicle ~= false then
+                SetPedIntoVehicle(ped, veh, seatIdx)
+                Citizen.Wait(50)
+              end
+
+              if seatDoor >= 0 then
+                SetVehicleDoorShut(veh, seatDoor, false)
+              end
+
+              if not (IsPedInVehicle(ped, veh, false) and GetPedInVehicleSeat(veh, seatIdx) == ped) then
+                return false
+              end
+
+              pedData[pedKey] = pedData[pedKey] or {}
+              pedData[pedKey].entity = ped
+              pedData[pedKey].detainedVehicleNet = safeEntityToNet(veh) or pedData[pedKey].detainedVehicleNet
+              pedData[pedKey].detainedSeat = seatIdx
+              holdPedAttention(ped, true)
+
+              if playerIsDriver or driverPed == 0 then
+                SetVehicleUndriveable(veh, false)
+                SetVehicleHandbrake(veh, false)
+                if engineWasRunning or playerIsDriver then
+                  SetVehicleEngineOn(veh, true, true, true)
+                end
+              end
+
+              return true
             end
 
             function toggleDragPed()
-              dprint("toggleDragPed called, draggedPed=", tostring(draggedPed))
-              if not draggedPed or not DoesEntityExist(draggedPed) then
-                dprint("toggleDragPed: no dragged ped")
+              local ped, netId = resolveCuffedPed()
+              dprint("toggleDragPed called, cuffedPed=", tostring(ped))
+              if not ped or not DoesEntityExist(ped) then
+                dprint("toggleDragPed: no cuffed ped")
                 return notify("drag_no","No Cuffed","No one cuffed.",'error','person-walking','#E53E3E')
               end
+
+              draggedPed = ped
               local player = PlayerPedId()
-              NetworkRequestControlOfEntity(draggedPed)
+              NetworkRequestControlOfEntity(ped)
+
+              if IsPedInAnyVehicle(ped, false) then
+                local veh = GetVehiclePedIsIn(ped, false)
+                if veh and veh ~= 0 then forcePedExitFromVehicle(ped, veh) end
+                Citizen.Wait(250)
+              end
+
               if not isDragging then
-                AttachEntityToEntity(draggedPed,player,0,0.0,0.6,-0.5,
-                  0,0,0,false,false,false,false,2,true)
+                applyCuffedPedState(ped, netId, true)
+                ClearPedTasksImmediately(ped)
+                local dragCfg = (Config and Config.PedCustody and Config.PedCustody.drag) or {}
+                if dragCfg.disableCollision == false then
+                  SetEntityCollision(ped, true, true)
+                else
+                  SetEntityCollision(ped, false, false)
+                end
+                local dragCfg = (Config and Config.PedCustody and Config.PedCustody.drag) or {}
+                AttachEntityToEntity(ped, player, tonumber(dragCfg.useBone) or 0, tonumber(dragCfg.offsetX) or 0.22, tonumber(dragCfg.offsetY) or 0.54, tonumber(dragCfg.offsetZ) or -0.02, tonumber(dragCfg.rotX) or 0.0, tonumber(dragCfg.rotY) or 0.0, tonumber(dragCfg.rotZ) or 0.0, false, false, false, false, 2, true)
                 isDragging = true
-                notify("drag_start","Dragging","Ped in front.",'inform','arrows-spin','#4299E1')
-                dprint("toggleDragPed: started dragging", tostring(draggedPed))
+                notify("drag_start","Dragging","Cuffed ped under escort.",'inform','arrows-spin','#4299E1')
+                dprint("toggleDragPed: started dragging", tostring(ped))
               else
-                DetachEntity(draggedPed,true,false)
+                DetachEntity(ped, true, false)
+                SetEntityCollision(ped, true, true)
                 isDragging = false
-                notify("drag_stop","Released","Ped released.",'success','arrows-spin','#38A169')
-                holdPedAttention(draggedPed, IsPedInAnyVehicle(draggedPed, false))
-                dprint("toggleDragPed: stopped dragging", tostring(draggedPed))
+                applyCuffedPedState(ped, netId, true)
+                local releasePos = GetOffsetFromEntityInWorldCoords(player, 0.0, 0.85, 0.0)
+                SetEntityCoordsNoOffset(ped, releasePos.x, releasePos.y, releasePos.z, false, false, false)
+                SetEntityHeading(ped, GetEntityHeading(player))
+                holdPedAttention(ped, false)
+                notify("drag_stop","Released","Cuffed ped released from escort.",'success','arrows-spin','#38A169')
+                dprint("toggleDragPed: stopped dragging", tostring(ped))
               end
             end
 
-            function seatPed(idx)
+            function seatPed(idx, explicitVeh)
               dprint("seatPed called idx=", tostring(idx))
-              if not draggedPed or not DoesEntityExist(draggedPed) then
-                dprint("seatPed: no draggedPed")
+              local ped, netId = resolveCuffedPed()
+              if not ped or not DoesEntityExist(ped) then
+                dprint("seatPed: no cuffed ped")
                 return notify("seat_no","No Ped","None to seat.",'error','car-side','#E53E3E')
               end
               local coords = GetEntityCoords(PlayerPedId())
-              local veh = nil
-              if lib and lib.getClosestVehicle then
+              local veh = explicitVeh
+              if (not veh or veh == 0 or not DoesEntityExist(veh)) and lib and lib.getClosestVehicle then
                 local v = lib.getClosestVehicle(coords, 6.0, false)
                 if type(v) == "table" then veh = v.vehicle or nil else veh = v end
               end
@@ -3599,10 +7335,18 @@ local stopEnabled, debugEnabled = true, true
                 return notify("seat_noveh","No Vehicle","No vehicle nearby.",'error','car-side','#E53E3E')
               end
 
-              NetworkRequestControlOfEntity(draggedPed)
-              TaskWarpPedIntoVehicle(draggedPed,veh,idx)
-              isDragging = false; draggedPed = nil
-              notify("seat_ok","Seated","Seat "..idx..".",'success','car-side','#38A169')
+              if not IsVehicleSeatFree(veh, idx) then
+                return notify("seat_busy","Seat Occupied","That rear seat is occupied.",'warning','car-side','#DD6B20')
+              end
+
+              local seatLabel = (idx == 1) and "left rear" or ((idx == 2) and "right rear" or ("seat " .. tostring(idx)))
+              local ok = placeCuffedPedIntoVehicle(ped, veh, idx, netId)
+              if not ok then
+                dprint("seatPed: failed to seat ped into vehicle", tostring(veh), "seat", tostring(idx))
+                return notify("seat_fail","Seat Failed","Could not place cuffed ped into the " .. seatLabel .. ".", 'error','car-side','#E53E3E')
+              end
+
+              notify("seat_ok","Seated","Placed cuffed ped in the " .. seatLabel .. ".",'success','car-side','#38A169')
               dprint("seatPed: seated ped into vehicle", tostring(veh), "seat", tostring(idx))
             end
 
@@ -3649,6 +7393,7 @@ local stopEnabled, debugEnabled = true, true
                         icon = 'fa-solid fa-clipboard-list',
                         distance = TARGET_DISTANCE or 2.5,
                         onSelect = function(data)
+                            cacheTargetPedContext(data)
                             tryOpenPoliceMenu()
                         end
                     }
@@ -3661,6 +7406,7 @@ local stopEnabled, debugEnabled = true, true
             AddEventHandler('onResourceStop', function(resName)
                 if GetCurrentResourceName() ~= resName then return end
                 pcall(function() exports.ox_target:removeGlobalPed({'open_police_menu'}) end)
+                pcall(function() exports.ox_target:removeGlobalVehicle({'az_police_seat_cuffed_left', 'az_police_seat_cuffed_right'}) end)
             end)
 
             AddEventHandler("onResourceStop", function(resName)
@@ -3775,12 +7521,73 @@ local stopEnabled, debugEnabled = true, true
               if not DoesEntityExist(responderPed) then print(" [AI DEBUG] responder does not exist") return end
               if not DoesEntityExist(casualty) then print(" [AI DEBUG] casualty does not exist") return end
 
+              local function hospitalCoords()
+                return vector3(357.43, -593.36, 28.79)
+              end
+
+              local function forcePedIntoVehicleSeat(targetPed, veh, seat)
+                if not DoesEntityExist(targetPed) or not DoesEntityExist(veh) then return false end
+                requestControl(targetPed, 1000)
+                requestControl(veh, 1000)
+                ClearPedTasksImmediately(targetPed)
+                TaskWarpPedIntoVehicle(targetPed, veh, seat)
+                Citizen.Wait(200)
+                return IsPedInVehicle(targetPed, veh, false)
+              end
+
+              local function loadIntoAmbulance(targetPed, ambVeh)
+                if not DoesEntityExist(targetPed) or not DoesEntityExist(ambVeh) then return false end
+                requestControl(targetPed, 1000)
+                requestControl(ambVeh, 1000)
+                ClearPedTasksImmediately(targetPed)
+                SetBlockingOfNonTemporaryEvents(targetPed, true)
+                SetPedKeepTask(targetPed, true)
+                FreezeEntityPosition(targetPed, false)
+
+                for _, seat in ipairs({1, 2, 0, 3}) do
+                  if IsVehicleSeatFree(ambVeh, seat) then
+                    if forcePedIntoVehicleSeat(targetPed, ambVeh, seat) then
+                      return true
+                    end
+                    ClearPedTasksImmediately(targetPed)
+                    SetPedIntoVehicle(targetPed, ambVeh, seat)
+                    Citizen.Wait(150)
+                    if IsPedInVehicle(targetPed, ambVeh, false) then
+                      return true
+                    end
+                  end
+                end
+
+                local retryPos = GetOffsetFromEntityInWorldCoords(ambVeh, 0.0, -3.2, 0.0)
+                SetEntityCoordsNoOffset(targetPed, retryPos.x, retryPos.y, retryPos.z, false, false, false)
+                Citizen.Wait(150)
+                for _, seat in ipairs({1, 2, 0, 3}) do
+                  if IsVehicleSeatFree(ambVeh, seat) then
+                    if forcePedIntoVehicleSeat(targetPed, ambVeh, seat) then
+                      return true
+                    end
+                    ClearPedTasksImmediately(targetPed)
+                    SetPedIntoVehicle(targetPed, ambVeh, seat)
+                    Citizen.Wait(150)
+                    if IsPedInVehicle(targetPed, ambVeh, false) then
+                      return true
+                    end
+                  end
+                end
+
+                AttachEntityToEntity(targetPed, ambVeh, -1, 0.0, -1.8, 0.6, 0.0, 0.0, 0.0, false, false, false, false, 0, true)
+                SetEntityCollision(targetPed, false, false)
+                SetEntityVisible(targetPed, false, false)
+                return true
+              end
+
               requestControl(responderPed, 2000)
+              requestControl(vehicle, 2000)
 
               if IsPedInAnyVehicle(responderPed, false) then
                 print(" [AI DEBUG] responder is in vehicle, forcing exit...")
                 forcePedExitVehicle(responderPed, vehicle)
-                Citizen.Wait(200)
+                Citizen.Wait(350)
               end
 
               TaskGoToEntity(responderPed, casualty, -1, 2.0, 2.0, 1073741824, 0)
@@ -3794,13 +7601,11 @@ local stopEnabled, debugEnabled = true, true
                 if dist <= 2.2 then break end
                 Citizen.Wait(200)
               end
-              print(" [AI DEBUG] responder reached casualty (or timed out) distance:", #(GetEntityCoords(responderPed) - GetEntityCoords(casualty)))
 
               local ccoords = GetEntityCoords(casualty)
               TaskTurnPedToFaceCoord(responderPed, ccoords.x, ccoords.y, ccoords.z, 500)
               if requestControl(responderPed, 500) then
                 TaskStartScenarioInPlace(responderPed, "CODE_HUMAN_MEDIC_TEND_TO_DEAD", 0, true)
-                print(" [AI DEBUG] started medic scenario")
               end
 
               Citizen.Wait(SERVICE_TIME_MS)
@@ -3809,29 +7614,103 @@ local stopEnabled, debugEnabled = true, true
 
               math.randomseed(math.floor(GetGameTimer() + GetEntityCoords(responderPed).x * 1000))
               local roll = math.random(1, 100)
-              print((" [AI DEBUG] revive roll=%d (need <= %d to revive)"):format(roll, REVIVE_CHANCE))
-              if roll <= REVIVE_CHANCE then
-                if DoesEntityExist(casualty) then
-                  requestControl(casualty, 500)
-                  ClearPedTasksImmediately(casualty)
-                  ResurrectPed(casualty)
-                  SetEntityHealth(casualty, 200)
-                  TaskStandStill(casualty, 1000)
-                  print(" [AI DEBUG] casualty revived and healed.")
-                end
-                if type(notify) == "function" then
-                  notify("ai_medic", "Revived", "Patient stabilized by AI medic.", 'success', 'heart', '#22c55e')
-                end
+              local outcome = nil
+              if roll <= 55 then
+                outcome = 'survived'
+              elseif roll <= 82 then
+                outcome = 'coma'
               else
+                outcome = 'died'
+              end
+              print((" [AI DEBUG] medic outcome roll=%d -> %s"):format(roll, outcome))
+
+              local loaded = false
+              if outcome == 'died' then
                 if DoesEntityExist(casualty) then
                   requestControl(casualty, 500)
                   SetEntityHealth(casualty, 0)
                   if not IsEntityDead(casualty) then ApplyDamageToPed(casualty, 1000, false) end
-                  print(" [AI DEBUG] casualty set to dead.")
                 end
                 if type(notify) == "function" then
-                  notify("ai_medic", "Patient Deceased", "AI medic could not revive the patient.", 'error', 'skull', '#ef4444')
+                  notify("ai_medic_report", "EMS Report", "Patient pronounced deceased at the scene.", 'error', 'skull', '#ef4444')
                 end
+              else
+                if DoesEntityExist(casualty) then
+                  requestControl(casualty, 500)
+                  ClearPedTasksImmediately(casualty)
+                  ResurrectPed(casualty)
+                  SetEntityHealth(casualty, outcome == 'survived' and 160 or 110)
+                  TaskStandStill(casualty, 1200)
+                end
+
+                if DoesEntityExist(vehicle) then
+                  loaded = loadIntoAmbulance(casualty, vehicle)
+                end
+
+                if type(notify) == "function" then
+                  if outcome == 'survived' then
+                    notify("ai_medic_transport", "EMS Transport", loaded and "Patient loaded into the ambulance and is being transported to the hospital." or "Patient stabilized. EMS is preparing hospital transport.", 'success', 'truck-medical', '#22c55e')
+                  else
+                    notify("ai_medic_transport", "EMS Transport", loaded and "Patient loaded into the ambulance and is being transported to the hospital in a coma." or "Patient is in a coma. EMS is preparing hospital transport.", 'warning', 'bed-pulse', '#f59e0b')
+                  end
+                end
+              end
+
+              if DoesEntityExist(responderPed) and DoesEntityExist(vehicle) then
+                Citizen.CreateThread(function()
+                  Citizen.Wait(900)
+                  requestControl(responderPed, 1000)
+                  requestControl(vehicle, 1000)
+
+                  if not IsPedInAnyVehicle(responderPed, false) then
+                    TaskEnterVehicle(responderPed, vehicle, 3500, -1, 1.0, 1, 0)
+                    local deadline = GetGameTimer() + 3500
+                    while GetGameTimer() < deadline and not IsPedInAnyVehicle(responderPed, false) do
+                      Citizen.Wait(100)
+                    end
+                    if not IsPedInAnyVehicle(responderPed, false) then
+                      TaskWarpPedIntoVehicle(responderPed, vehicle, -1)
+                      Citizen.Wait(150)
+                    end
+                  end
+
+                  if outcome ~= 'died' and DoesEntityExist(casualty) and not IsPedInVehicle(casualty, vehicle, false) then
+                    loadIntoAmbulance(casualty, vehicle)
+                  end
+
+                  if IsPedInAnyVehicle(responderPed, false) and GetPedInVehicleSeat(vehicle, -1) == responderPed then
+                    local hospital = hospitalCoords()
+                    SetVehicleHandbrake(vehicle, false)
+                    SetVehicleEngineOn(vehicle, true, true, true)
+                    SetVehicleUndriveable(vehicle, false)
+                    if type(SetDriverAbility) == "function" then pcall(SetDriverAbility, responderPed, 1.0) end
+                    if type(SetDriverAggressiveness) == "function" then pcall(SetDriverAggressiveness, responderPed, 0.0) end
+                    TaskVehicleDriveToCoordLongrange(responderPed, vehicle, hospital.x, hospital.y, hospital.z, 24.0, 786603, 18.0)
+
+                    if outcome ~= 'died' then
+                      local deadline = GetGameTimer() + 45000
+                      while GetGameTimer() < deadline and DoesEntityExist(vehicle) do
+                        local dist = #(GetEntityCoords(vehicle) - hospital)
+                        if dist <= 55.0 then break end
+                        Citizen.Wait(500)
+                      end
+                      if DoesEntityExist(casualty) then
+                        requestControl(casualty, 500)
+                        DetachEntity(casualty, true, true)
+                        DeleteEntity(casualty)
+                      end
+                      if type(notify) == "function" then
+                        if outcome == 'survived' then
+                          notify("ai_medic_report", "EMS Report", "Patient transported to the hospital and survived.", 'success', 'heart', '#22c55e')
+                        else
+                          notify("ai_medic_report", "EMS Report", "Patient transported to the hospital and remains in a coma.", 'warning', 'bed-pulse', '#f59e0b')
+                        end
+                      end
+                    end
+
+                    TaskVehicleDriveWander(responderPed, vehicle, 20.0, 786603)
+                  end
+                end)
               end
             end
 
@@ -3927,6 +7806,21 @@ local stopEnabled, debugEnabled = true, true
         else
             print("[Az-FR | CALLOUT System] You are not an allowed department.")
         end
+    end
+
+    local function waitForFrameworkReady(timeoutMs)
+        local untilT = GetGameTimer() + (timeoutMs or 15000)
+        while GetGameTimer() < untilT do
+            if type(GetResourceState) == "function" and GetResourceState("Az-Framework") == "started" then
+                return true
+            end
+            Wait(250)
+        end
+        return false
+    end
+
+    if not waitForFrameworkReady(15000) then
+        print("[Az-FR | CALLOUT System] Az-Framework not started yet; continuing to wait for job sync...")
     end
 
     Wait(200) -- allow exports to init (JIP-safe)

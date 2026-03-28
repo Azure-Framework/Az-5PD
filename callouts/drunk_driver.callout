@@ -1,6 +1,6 @@
 return {
-  title = "Drunk Driver",
-  description = "Caller reports a vehicle being driven erratically.",
+  title = "Possible DUI Driver",
+  description = "Caller reports a vehicle swerving, nearly struck a curb, and is now partially stopped with hazards on.",
   server = {
     getCoords = function()
       local base = { x = 215.76, y = -810.12, z = 30.73 }
@@ -11,35 +11,96 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg)
+        BeginTextCommandThefeedPost("STRING")
+        AddTextComponentSubstringPlayerName(msg)
+        EndTextCommandThefeedPostTicker(false, false)
+      end
+      local function load(hash)
+        RequestModel(hash)
+        local timeout = GetGameTimer() + 4000
+        while not HasModelLoaded(hash) and GetGameTimer() < timeout do Wait(10) end
+        return HasModelLoaded(hash)
+      end
+      local function loadAnimSet(name)
+        RequestAnimSet(name)
+        local timeout = GetGameTimer() + 3000
+        while not HasAnimSetLoaded(name) and GetGameTimer() < timeout do Wait(10) end
+        return HasAnimSetLoaded(name)
+      end
+      local function distance(a, b)
+        local dx, dy, dz = a.x-b.x, a.y-b.y, (a.z or 0.0)-(b.z or 0.0)
+        return math.sqrt(dx*dx + dy*dy + dz*dz)
+      end
       return function(coords)
+        local entities = {}
+        local props = {}
         local vehHash = GetHashKey("btype3")
         local pedHash = GetHashKey("a_m_m_bevhills_01")
-        RequestModel(vehHash); RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while (not HasModelLoaded(vehHash) or not HasModelLoaded(pedHash)) and GetGameTimer()-t0 < 3000 do Citizen.Wait(10) end
-        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z + 0.5, 0.0, true, false)
-        local driver = nil
+        local bottleHash = GetHashKey("prop_cs_beer_bot_01")
+        if not (load(vehHash) and load(pedHash) and load(bottleHash)) then return function() end end
+        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z + 0.5, math.random(0, 359) + 0.0, true, false)
         if DoesEntityExist(veh) then
           SetEntityAsMissionEntity(veh, true, true)
           SetVehicleOnGroundProperly(veh)
-          driver = CreatePedInsideVehicle(veh, 4, pedHash, -1, true, false)
-          if DoesEntityExist(driver) then
-            SetPedKeepTask(driver, true)
-            TaskVehicleDriveWander(driver, veh, 25.0, 786603)
-            SetPedAsCop(driver, false)
-          end
+          SetVehicleEngineOn(veh, true, true, false)
+          SetVehicleIndicatorLights(veh, 0, true)
+          SetVehicleIndicatorLights(veh, 1, true)
+          SetVehicleDoorOpen(veh, 0, false, false)
+          SetVehicleDoorsLocked(veh, 1)
+          SetVehicleEngineHealth(veh, 650.0)
+          table.insert(entities, veh)
         end
+        local driver = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, pedHash, -1, true, false) or 0
+        if driver ~= 0 and DoesEntityExist(driver) then
+          SetEntityAsMissionEntity(driver, true, true)
+          SetBlockingOfNonTemporaryEvents(driver, true)
+          SetPedKeepTask(driver, true)
+          SetPedAsCop(driver, false)
+          table.insert(entities, driver)
+        end
+        local bottle = CreateObject(bottleHash, coords.x + 0.7, coords.y - 0.6, coords.z, true, true, false)
+        if DoesEntityExist(bottle) then PlaceObjectOnGroundProperly(bottle) SetEntityAsMissionEntity(bottle, true, true) table.insert(props, bottle) end
 
-        -- return cleanup function
+        local stagedExit = false
+        CreateThread(function()
+          local shown1, shown2 = false, false
+          local endAt = GetGameTimer() + 90000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            if not DoesEntityExist(driver) then break end
+            local p = GetEntityCoords(PlayerPedId())
+            local d = distance({x=p.x,y=p.y,z=p.z}, coords)
+            if not shown1 and d < 45.0 then
+              shown1 = true
+              notify("Dispatch Update: Vehicle is reported to have clipped a curb. Caller saw an open container tossed near the driver door.")
+            end
+            if not stagedExit and d < 16.0 and IsPedInVehicle(driver, veh, false) then
+              stagedExit = true
+              SetPedIsDrunk(driver, true)
+              SetVehicleEngineOn(veh, true, true, false)
+              SetVehicleUndriveable(veh, false)
+              SetVehicleHandbrake(veh, false)
+              StartVehicleHorn(veh, 150, GetHashKey("HELDDOWN"), false)
+              TaskVehicleDriveWander(driver, veh, 12.0, 786468)
+              CreateThread(function()
+                local untilAt = GetGameTimer() + 6000
+                while GetGameTimer() < untilAt and DoesEntityExist(driver) and DoesEntityExist(veh) and GetPedInVehicleSeat(veh, -1) == driver do
+                  TaskVehicleTempAction(driver, veh, math.random(4,5), math.random(400,900))
+                  Wait(math.random(900, 1400))
+                end
+              end)
+            end
+            if not shown2 and d < 12.0 then
+              shown2 = true
+              notify("Driver: I just need a minute... I'm good to drive. Odor of alcohol and slurred speech are obvious.")
+            end
+          end
+        end)
+
         return function()
-          if DoesEntityExist(driver) then
-            SetEntityAsMissionEntity(driver, true, true)
-            DeletePed(driver)
-          end
-          if DoesEntityExist(veh) then
-            SetEntityAsMissionEntity(veh, true, true)
-            DeleteVehicle(veh)
-          end
+          for _, obj in ipairs(props) do if DoesEntityExist(obj) then DeleteEntity(obj) end end
+          for _, ent in ipairs(entities) do if DoesEntityExist(ent) then DeleteEntity(ent) end end
         end
       end
     ]]

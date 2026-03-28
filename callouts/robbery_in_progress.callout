@@ -1,6 +1,6 @@
 return {
-  title = "Robbery in Progress",
-  description = "Clerk whispered 911: suspect inside demanding cash.",
+  title = "Robbery in Progress - High Risk",
+  description = "Store clerk whispered 911. Armed suspect is inside, cash register open, and one customer is still in the store.",
   server = {
     getCoords = function()
       local base = { x = 28.0, y = -1339.0, z = 29.5 }
@@ -11,37 +11,33 @@ return {
   },
   client = {
     script = [[
-      local function dist(a, b)
-        local dx,dy,dz = (a.x-b.x), (a.y-b.y), ((a.z or 0.0)-(b.z or 0.0))
-        return math.sqrt(dx*dx+dy*dy+dz*dz)
-      end
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local robber = GetHashKey("g_m_y_ballaorig_01")
-        RequestModel(robber)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(robber) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-
+        local ents = {}
+        local robber, clerk, customer = GetHashKey("g_m_y_ballaorig_01"), GetHashKey("mp_m_shopkeep_01"), GetHashKey("a_f_y_business_03")
+        if not (load(robber) and load(clerk) and load(customer)) then return function() end end
         local ped = CreatePed(4, robber, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
-        if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 80, false, true)
-          SetPedCombatAttributes(ped, 46, true)
-          SetBlockingOfNonTemporaryEvents(ped,true)
-          SetPedKeepTask(ped,true)
-          TaskGuardCurrentPosition(ped, 5.0, 5.0, true)
-          Citizen.CreateThread(function()
-            while DoesEntityExist(ped) do
-              Citizen.Wait(700)
-              local pcoords = GetEntityCoords(PlayerPedId())
-              local pc = {x=pcoords.x,y=pcoords.y,z=pcoords.z}
-              if dist(pc, coords) < 15.0 then
-                TaskCombatPed(ped, PlayerPedId(), 0, 16)
-                break
-              end
-            end
-          end)
-        end
-        return { ped }
+        local c = CreatePed(4, clerk, coords.x+1.5, coords.y+0.4, coords.z+0.5, 180.0, true, false)
+        local cust = CreatePed(4, customer, coords.x-2.0, coords.y+1.0, coords.z+0.5, 90.0, true, false)
+        for _, e in ipairs({ped,c,cust}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(ped) then GiveWeaponToPed(ped, GetHashKey("WEAPON_PISTOL"), 80, false, true) TaskGuardCurrentPosition(ped, 5.0, 5.0, true) end
+        if DoesEntityExist(c) then TaskHandsUp(c, 45000, ped, -1, true) end
+        if DoesEntityExist(cust) then TaskCower(cust, 45000) end
+        CreateThread(function()
+          local a,b,agg=false,false,false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(ped) do
+            Wait(500)
+            local pcoords = GetEntityCoords(PlayerPedId())
+            local d = dist({x=pcoords.x,y=pcoords.y,z=pcoords.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Clerk whispered the suspect is demanding money and looking toward the entrance every few seconds.") end
+            if not b and d < 18.0 then b = true notify("Customer is crouched behind a display. Suspect has a handgun and the register drawer is open.") end
+            if not agg and d < 12.0 then agg = true TaskCombatPed(ped, PlayerPedId(), 0, 16) end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

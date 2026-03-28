@@ -1,0 +1,39 @@
+return {
+  title = "Prowler Reported",
+  description = "Resident sees a subject looking into parked cars and peering through side-yard gates in a neighborhood.",
+  server = {
+    getCoords = function()
+      local base = { x = -1326.0, y = 430.0, z = 100.0 }
+      local rx = base.x + math.random(-18,18)
+      local ry = base.y + math.random(-18,18)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
+      return function(coords)
+        local ents = {}
+        local ph = GetHashKey("a_m_m_trampbeac_01")
+        if not load(ph) then return function() end end
+        local ped = CreatePed(4, ph, coords.x, coords.y, coords.z+0.5, math.random(0,359)+0.0, true, false)
+        if DoesEntityExist(ped) then SetEntityAsMissionEntity(ped,true,true) SetBlockingOfNonTemporaryEvents(ped,true) SetPedKeepTask(ped,true) table.insert(ents,ped) TaskWanderStandard(ped, 2.0, 10) end
+        CreateThread(function()
+          local a,b,run = false,false,false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(ped) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Resident says the subject keeps checking door handles on parked cars and walked through two different driveways.") end
+            if not b and d < 14.0 then b = true notify("Subject appears to be scanning yards and avoiding houses with lights on.") end
+            if not run and d < 9.0 then run = true ClearPedTasks(ped) TaskSmartFleePed(ped, PlayerPedId(), 120.0, 12000, false, false) notify("Subject notices your unit and starts trying to leave the area on foot.") end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
+      end
+    ]]
+  }
+}

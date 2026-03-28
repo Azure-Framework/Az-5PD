@@ -1,6 +1,6 @@
 return {
-  title = "Traffic Collision - Possible Injuries",
-  description = "Two vehicles involved in a collision. Injuries reported.",
+  title = "Traffic Collision - Injury Investigation",
+  description = "Two vehicles are disabled in the roadway. One driver is injured and witnesses are giving conflicting accounts.",
   server = {
     getCoords = function()
       local base = { x = 402.0, y = -1020.0, z = 29.0 }
@@ -11,46 +11,39 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local veh1 = GetHashKey("blista")
-        local veh2 = GetHashKey("primo2")
-        RequestModel(veh1); RequestModel(veh2)
-        local t0 = GetGameTimer()
-        while (not HasModelLoaded(veh1) or not HasModelLoaded(veh2)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
-
+        local ents, props = {}, {}
+        local veh1, veh2 = GetHashKey("blista"), GetHashKey("primo2")
+        local p1h, p2h, wh = GetHashKey("a_m_y_business_03"), GetHashKey("a_f_y_business_04"), GetHashKey("a_m_y_beachvesp_01")
+        local coneHash = GetHashKey("prop_roadcone02a")
+        if not (load(veh1) and load(veh2) and load(p1h) and load(p2h) and load(wh) and load(coneHash)) then return function() end end
         local angle = math.random(0,359) + 0.0
         local v1 = CreateVehicle(veh1, coords.x+2.5, coords.y, coords.z, angle, true, false)
-        local v2 = CreateVehicle(veh2, coords.x-2.5, coords.y, coords.z, angle+180.0, true, false)
-
-        local peds = {}
-        if DoesEntityExist(v1) then
-          SetEntityAsMissionEntity(v1,true,true)
-          SetVehicleEngineHealth(v1, 100.0)
-          SetVehicleDoorsLocked(v1, 1)
-          local d1 = CreatePedInsideVehicle(v1, 4, GetHashKey("a_m_y_business_03"), -1, true, false)
-          if DoesEntityExist(d1) then
-            SetEntityAsMissionEntity(d1,true,true)
-            TaskWrithe(d1, PlayerPedId(), 5000, 0)
-            table.insert(peds, d1)
+        local v2 = CreateVehicle(veh2, coords.x-2.5, coords.y, coords.z, angle+150.0, true, false)
+        for _, v in ipairs({v1,v2}) do if DoesEntityExist(v) then SetEntityAsMissionEntity(v,true,true) SetVehicleEngineHealth(v, 180.0) SetVehicleUndriveable(v,true) table.insert(ents,v) end end
+        local d1 = DoesEntityExist(v1) and CreatePedInsideVehicle(v1, 4, p1h, -1, true, false) or 0
+        local d2 = DoesEntityExist(v2) and CreatePedInsideVehicle(v2, 4, p2h, -1, true, false) or 0
+        local witness = CreatePed(4, wh, coords.x+5.0, coords.y+1.2, coords.z+0.5, 90.0, true, false)
+        for _, ped in ipairs({d1,d2,witness}) do if ped ~= 0 and DoesEntityExist(ped) then SetEntityAsMissionEntity(ped,true,true) SetBlockingOfNonTemporaryEvents(ped,true) table.insert(ents,ped) end end
+        if d1 ~= 0 and DoesEntityExist(d1) then TaskWrithe(d1, PlayerPedId(), 5000, 0) end
+        if d2 ~= 0 and DoesEntityExist(d2) then TaskStandStill(d2, 30000) end
+        if DoesEntityExist(witness) then TaskStartScenarioInPlace(witness, "WORLD_HUMAN_STAND_MOBILE", 0, true) end
+        for i = 1, 3 do local o = CreateObject(coneHash, coords.x + (i*1.4), coords.y + 2.2, coords.z-1.0, true, true, false) if DoesEntityExist(o) then SetEntityAsMissionEntity(o,true,true) table.insert(props,o) end end
+        CreateThread(function()
+          local a,b = false,false
+          local endAt = GetGameTimer()+90000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: One driver reports the other ran the light. Injuries are reported but both vehicles are disabled.") end
+            if not b and d < 12.0 then b = true notify("Witness: The dark sedan was speeding before impact. The blue compact's driver keeps saying their chest hurts.") end
           end
-        end
-        if DoesEntityExist(v2) then
-          SetEntityAsMissionEntity(v2,true,true)
-          SetVehicleEngineHealth(v2, 100.0)
-          SetVehicleDoorsLocked(v2, 1)
-          local d2 = CreatePedInsideVehicle(v2, 4, GetHashKey("a_f_y_business_04"), -1, true, false)
-          if DoesEntityExist(d2) then
-            SetEntityAsMissionEntity(d2,true,true)
-            TaskWrithe(d2, PlayerPedId(), 5000, 0)
-            table.insert(peds, d2)
-          end
-        end
-
-        local out = {}
-        if DoesEntityExist(v1) then table.insert(out, v1) end
-        if DoesEntityExist(v2) then table.insert(out, v2) end
-        for _,p in ipairs(peds) do table.insert(out, p) end
-        return out
+        end)
+        return function() for _, o in ipairs(props) do if DoesEntityExist(o) then DeleteEntity(o) end end for _, e in ipairs(ents) do if e ~= 0 and DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

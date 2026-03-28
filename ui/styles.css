@@ -167,8 +167,8 @@
     @keyframes mdtIn { from { opacity:0; transform:translateX(-50%) translateY(-10px);} to { opacity:1; transform:translateX(-50%) translateY(0);} }
 
     .status.valid, .status.active, .status.clear { color:var(--accent); background:rgba(0,255,140,0.1); border:1px solid rgba(0,255,140,0.2); }
-    .status.stolen, .status.wanted, .status.suspended { color:var(--danger); background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.2); }
-    .status.expired, .status.pending { color:var(--warning); background:rgba(255,193,7,0.1); border:1px solid rgba(255,193,7,0.2); }
+    .status.stolen, .status.wanted, .status.suspended, .status.revoked, .status.none { color:var(--danger); background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.2); }
+    .status.expired, .status.expire, .status.pending { color:var(--warning); background:rgba(255,193,7,0.1); border:1px solid rgba(255,193,7,0.2); }
 
     /* Resize grip (bottom-right inside #app) */
     .resize-grip {

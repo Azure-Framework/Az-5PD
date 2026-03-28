@@ -1,6 +1,6 @@
 return {
-  title = "Suspicious Person",
-  description = "Caller reports a person loitering and looking into vehicles.",
+  title = "Suspicious Person Checking Vehicles",
+  description = "Caller reports a subject peeking into parked cars and testing door handles.",
   server = {
     getCoords = function()
       local base = { x = 115.0, y = -1060.0, z = 29.2 }
@@ -11,29 +11,31 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local models = { "a_m_m_skater_01", "a_m_y_hipster_02", "a_m_y_stwhi_01" }
-        local pedHash = GetHashKey(models[math.random(#models)])
-        RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-
-        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
-        if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          SetBlockingOfNonTemporaryEvents(ped,true)
-          TaskWanderStandard(ped, 5.0, 10)
-          Citizen.CreateThread(function()
-            local start = GetGameTimer()
-            while DoesEntityExist(ped) and GetGameTimer()-start < 30000 do
-              Citizen.Wait(math.random(3000,6000))
-              TaskStartScenarioInPlace(ped, "WORLD_HUMAN_BUM_WASH", 0, true)
-              Citizen.Wait(2000)
-              ClearPedTasks(ped)
-            end
-          end)
-        end
-        return { ped }
+        local ents = {}
+        local pedHash, carHash = GetHashKey("a_m_m_skater_01"), GetHashKey("intruder")
+        if not (load(pedHash) and load(carHash)) then return function() end end
+        local targetVeh = CreateVehicle(carHash, coords.x+1.8, coords.y, coords.z, 100.0, true, false)
+        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, 80.0, true, false)
+        for _, e in ipairs({targetVeh, ped}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) table.insert(ents,e) end end
+        if DoesEntityExist(targetVeh) then SetVehicleDoorsLocked(targetVeh, 2) end
+        if DoesEntityExist(ped) then SetBlockingOfNonTemporaryEvents(ped,true) TaskTurnPedToFaceEntity(ped, targetVeh, -1) TaskStartScenarioInPlace(ped, "WORLD_HUMAN_WELDING", 0, true) end
+        CreateThread(function()
+          local a,b,run=false,false,false
+          local endAt = GetGameTimer()+75000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 30.0 then a = true notify("Dispatch Update: Caller says the subject looked under several handles before stopping at this sedan.") end
+            if not b and d < 12.0 then b = true notify("You can see the subject trying the door handle and peering through the windows.") end
+            if not run and d < 8.0 then run = true if DoesEntityExist(ped) then ClearPedTasks(ped) TaskSmartFleePed(ped, PlayerPedId(), 60.0, -1, true, true) end end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

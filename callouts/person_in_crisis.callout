@@ -1,6 +1,6 @@
 return {
-  title = "Person in Crisis",
-  description = "Caller reports a person in mental health crisis, unarmed, agitated.",
+  title = "Person in Crisis - De-escalation Needed",
+  description = "Subject is pacing, crying, and speaking incoherently. Caller says they have not threatened anyone yet.",
   server = {
     getCoords = function()
       local base = { x = 187.0, y = -920.0, z = 30.7 }
@@ -11,26 +11,36 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local pedHash = GetHashKey("a_m_m_skidrow_01")
-        RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-
+        local ents = {}
+        local pedHash, witnessHash = GetHashKey("a_m_m_skidrow_01"), GetHashKey("a_f_y_business_01")
+        if not (load(pedHash) and load(witnessHash)) then return function() end end
         local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
-        if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          SetBlockingOfNonTemporaryEvents(ped,true)
-          TaskStartScenarioInPlace(ped, "WORLD_HUMAN_STAND_IMPATIENT", 0, true)
-          Citizen.CreateThread(function()
-            local start = GetGameTimer()
-            while DoesEntityExist(ped) and GetGameTimer()-start < 30000 do
-              Citizen.Wait(math.random(2000,4000))
-              PlayPain(ped, 7, 0)
+        local witness = CreatePed(4, witnessHash, coords.x+5.0, coords.y+2.5, coords.z+0.5, 180.0, true, false)
+        for _, e in ipairs({ped, witness}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(ped) then TaskWanderStandard(ped, 2.0, 10) end
+        if DoesEntityExist(witness) then TaskStartScenarioInPlace(witness, "WORLD_HUMAN_STAND_MOBILE", 0, true) end
+        CreateThread(function()
+          local spoken1, spoken2, handled = false, false, false
+          local endAt = GetGameTimer()+90000
+          while GetGameTimer() < endAt and DoesEntityExist(ped) do
+            Wait(600)
+            local p = GetEntityCoords(PlayerPedId())
+            local pc = {x=p.x,y=p.y,z=p.z}
+            local d = dist(pc, coords)
+            if not spoken1 and d < 35.0 then spoken1 = true notify("Dispatch Update: Witness says subject keeps saying someone is after them and has not slept in days.") end
+            if not spoken2 and d < 15.0 then spoken2 = true notify("Subject: Please don't rush me... I don't want to go back there. Calm verbal commands may work better here.") end
+            if not handled and d < 8.0 then
+              handled = true
+              ClearPedTasks(ped)
+              TaskHandsUp(ped, 12000, PlayerPedId(), -1, true)
             end
-          end)
-        end
-        return { ped }
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

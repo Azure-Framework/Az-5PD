@@ -67,6 +67,31 @@ end
 
 local function v3(v) local x,y,z=toXYZ(v); return (x and vector3(x,y,z)) or nil end
 
+local function getClosestVehicleNodePosHeading(x, y, z, nodeType, p6, p7)
+  local r1, r2, r3, r4 = GetClosestVehicleNodeWithHeading(x, y, z, nodeType or 1, p6 or 3.0, p7 or 0)
+
+  if type(r1) == 'boolean' then
+    if not r1 then return nil, nil, false end
+    local px, py, pz = toXYZ(r2)
+    if px and py and pz then
+      return vector3(px, py, pz), num(r3) or 0.0, true
+    end
+    return nil, nil, false
+  end
+
+  local px, py, pz = toXYZ(r1)
+  if px and py and pz then
+    return vector3(px, py, pz), num(r2) or 0.0, true
+  end
+
+  px, py, pz = num(r1), num(r2), num(r3)
+  if px and py and pz then
+    return vector3(px, py, pz), num(r4) or 0.0, true
+  end
+
+  return nil, nil, false
+end
+
 local function requestModelSync(hashOrName)
   local hash = (type(hashOrName)=='number') and hashOrName or GetHashKey(hashOrName)
   if not HasModelLoaded(hash) then
@@ -110,12 +135,13 @@ local function cleanupLater(entities, delayMs, minDistFromPlayer)
     while GetGameTimer() - t0 < delay do
       Wait(250)
     end
+
     local player = PlayerPedId()
     local ppos = DoesEntityExist(player) and GetEntityCoords(player) or nil
     local deadline = GetGameTimer() + 20000
     while ppos and GetGameTimer() < deadline do
       local far = true
-      for _,e in ipairs(entities or {}) do
+      for _, e in ipairs(entities or {}) do
         if e and DoesEntityExist(e) then
           local d = #(GetEntityCoords(e) - ppos)
           if d < minDist then
@@ -124,10 +150,11 @@ local function cleanupLater(entities, delayMs, minDistFromPlayer)
           end
         end
       end
-      if far then break
+      if far then break end
       Wait(400)
     end
-    for _,e in ipairs(entities or {}) do
+
+    for _, e in ipairs(entities or {}) do
       if e and DoesEntityExist(e) then
         SetEntityAsMissionEntity(e, true, true)
         if IsEntityAVehicle(e) then
@@ -294,8 +321,8 @@ AzServices.EMS = function()
   local P = AzServices.Params.EMS
   local player = PlayerPedId()
   local ppos = GetEntityCoords(player)
-  local nx,ny,nz, hdg = GetClosestVehicleNodeWithHeading(ppos.x+40.0, ppos.y+40.0, ppos.z)
-  local spawn = vector3(nx or (ppos.x+25.0), ny or (ppos.y+25.0), nz or ppos.z)
+  local spawn, hdg = getClosestVehicleNodePosHeading(ppos.x+40.0, ppos.y+40.0, ppos.z)
+  spawn = spawn or vector3(ppos.x+25.0, ppos.y+25.0, ppos.z)
 
   local veh, driver = spawnVehicleAndDriver(AzServices.Models.EMS_VEH, AzServices.Models.EMS_PED, spawn, hdg or 0.0)
   if not veh then return notify('svc_ems_fail','EMS','Could not spawn ambulance.','error','heartbeat','#DD6B20') end
@@ -335,8 +362,8 @@ AzServices.Coroner = function()
   local P = AzServices.Params.Coroner
   local player = PlayerPedId()
   local ppos = GetEntityCoords(player)
-  local nx,ny,nz, hdg = GetClosestVehicleNodeWithHeading(ppos.x+35.0, ppos.y+35.0, ppos.z)
-  local spawn = vector3(nx or (ppos.x+20.0), ny or (ppos.y+20.0), nz or ppos.z)
+  local spawn, hdg = getClosestVehicleNodePosHeading(ppos.x+35.0, ppos.y+35.0, ppos.z)
+  spawn = spawn or vector3(ppos.x+20.0, ppos.y+20.0, ppos.z)
 
   local veh, driver = spawnVehicleAndDriver(AzServices.Models.CORONER_V, AzServices.Models.CORONER_P, spawn, hdg or 0.0)
   if not veh then return notify('svc_cor_fail','Coroner','Could not spawn coroner van.','error','skull-crossbones','#DD6B20') end
@@ -376,8 +403,8 @@ AzServices.AnimalControl = function()
   local P = AzServices.Params.Animal
   local player = PlayerPedId()
   local ppos = GetEntityCoords(player)
-  local nx,ny,nz, hdg = GetClosestVehicleNodeWithHeading(ppos.x+35.0, ppos.y+35.0, ppos.z)
-  local spawn = vector3(nx or (ppos.x+20.0), ny or (ppos.y+20.0), nz or ppos.z)
+  local spawn, hdg = getClosestVehicleNodePosHeading(ppos.x+35.0, ppos.y+35.0, ppos.z)
+  spawn = spawn or vector3(ppos.x+20.0, ppos.y+20.0, ppos.z)
 
   local veh, driver = spawnVehicleAndDriver(AzServices.Models.ANIMAL_V, AzServices.Models.ANIMAL_P, spawn, hdg or 0.0)
   if not veh then return notify('svc_an_fail','Animal Control','Could not spawn vehicle.','error','paw','#DD6B20') end
@@ -417,8 +444,8 @@ AzServices.Tow = function()
   local P = AzServices.Params.Tow
   local player = PlayerPedId()
   local ppos = GetEntityCoords(player)
-  local nx,ny,nz, hdg = GetClosestVehicleNodeWithHeading(ppos.x+45.0, ppos.y+45.0, ppos.z)
-  local spawn = vector3(nx or (ppos.x+30.0), ny or (ppos.y+30.0), nz or ppos.z)
+  local spawn, hdg = getClosestVehicleNodePosHeading(ppos.x+45.0, ppos.y+45.0, ppos.z)
+  spawn = spawn or vector3(ppos.x+30.0, ppos.y+30.0, ppos.z)
 
   local veh, driver = spawnVehicleAndDriver(AzServices.Models.TOW_VEH, AzServices.Models.TOW_PED, spawn, hdg or 0.0)
   if not veh then return notify('svc_tow_fail','Tow','Could not spawn truck.','error','truck','#DD6B20') end

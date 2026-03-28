@@ -1,6 +1,6 @@
 return {
-  title = "Suspicious Vehicle",
-  description = "Parked vehicle running for a long time, occupants unknown.",
+  title = "Suspicious Vehicle - Occupied",
+  description = "Vehicle has been idling for an extended time. Caller says occupants are ducking down and watching nearby houses.",
   server = {
     getCoords = function()
       local base = { x = 380.0, y = -204.0, z = 58.0 }
@@ -11,22 +11,47 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local vehHash = GetHashKey("glendale")
-        RequestModel(vehHash)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(vehHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-
-        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z, math.random(0,360)+0.0, true, false)
+        local ents = {}
+        local vh, dh, ph = GetHashKey("glendale"), GetHashKey("a_m_y_soucent_01"), GetHashKey("a_m_m_skater_01")
+        if not (load(vh) and load(dh) and load(ph)) then return function() end end
+        local veh = CreateVehicle(vh, coords.x, coords.y, coords.z, math.random(0,359)+0.0, true, false)
         if DoesEntityExist(veh) then
           SetEntityAsMissionEntity(veh,true,true)
           SetVehicleEngineOn(veh, true, true, false)
           SetVehicleDoorsLocked(veh, 1)
           SetVehicleLights(veh, 2)
+          SetVehicleDirtLevel(veh, 8.0)
+          table.insert(ents,veh)
         end
-        local out = {}
-        if DoesEntityExist(veh) then table.insert(out,veh) end
-        return out
+        local driver = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, dh, -1, true, false) or 0
+        local passenger = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, ph, 0, true, false) or 0
+        for _, e in ipairs({driver, passenger}) do if e ~= 0 and DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if passenger ~= 0 and DoesEntityExist(passenger) then TaskStartScenarioInPlace(passenger, "WORLD_HUMAN_DRINKING", 0, true) end
+        CreateThread(function()
+          local shown1, shown2, reacted = false, false, false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(driver) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not shown1 and d < 40.0 then shown1 = true notify("Dispatch Update: Caller says the vehicle has circled the block twice and keeps parking in front of the same house.") end
+            if not shown2 and d < 15.0 then shown2 = true notify("Occupants are reaching around the center console and avoiding eye contact. Driver appears extremely nervous.") end
+            if not reacted and d < 10.0 then
+              reacted = true
+              if math.random() < 0.45 and DoesEntityExist(veh) and DoesEntityExist(driver) then
+                TaskVehicleDriveWander(driver, veh, 18.0, 786603)
+                notify("Driver abruptly tries to leave as you approach the window.")
+              else
+                TaskVehicleTempAction(driver, veh, 27, 3000)
+              end
+            end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if e ~= 0 and DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

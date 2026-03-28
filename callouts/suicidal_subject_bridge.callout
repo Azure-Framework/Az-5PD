@@ -1,0 +1,42 @@
+return {
+  title = "Suicidal Subject - Bridge Response",
+  description = "Caller reports a distressed subject standing near a bridge edge and crying. Immediate de-escalation requested.",
+  server = {
+    getCoords = function()
+      local base = { x = -724.0, y = -1295.0, z = 5.0 }
+      local rx = base.x + math.random(-16,16)
+      local ry = base.y + math.random(-16,16)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
+      return function(coords)
+        local ents = {}
+        local sh, wh = GetHashKey("a_f_y_eastsa_03"), GetHashKey("a_m_y_runner_01")
+        if not (load(sh) and load(wh)) then return function() end end
+        local subj = CreatePed(4, sh, coords.x, coords.y, coords.z+0.5, 180.0, true, false)
+        local witness = CreatePed(4, wh, coords.x+5.0, coords.y+2.5, coords.z+0.5, 0.0, true, false)
+        for _, e in ipairs({subj,witness}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(subj) then TaskStandStill(subj, 45000) end
+        if DoesEntityExist(witness) then TaskStartScenarioInPlace(witness, "WORLD_HUMAN_STAND_MOBILE", 0, true) end
+        CreateThread(function()
+          local a,b,handle = false,false,false
+          local endAt = GetGameTimer()+90000
+          while GetGameTimer() < endAt and DoesEntityExist(subj) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Witness says the subject has been crying, saying they can't do this anymore, and keeps stepping closer to the edge.") end
+            if not b and d < 15.0 then b = true notify("Subject: Please just stay back... I don't want anyone touching me right now.") end
+            if not handle and d < 8.0 then handle = true ClearPedTasks(subj) TaskHandsUp(subj, 12000, PlayerPedId(), -1, true) notify("Subject freezes in place and seems responsive to calm commands.") end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
+      end
+    ]]
+  }
+}

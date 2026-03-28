@@ -1,8 +1,55 @@
 Config = Config or {}
 
+
+local function az5pdNormalizeJobName(name)
+  if name == nil then return nil end
+  return string.lower(tostring(name))
+end
+
+local function az5pdGetAllowedJobs()
+  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
+  if type(cfg) == 'table' and next(cfg) ~= nil then
+    return cfg
+  end
+  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+end
+
+local function az5pdJobAllowed(jobName)
+  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
+  local normalized = az5pdNormalizeJobName(jobName)
+  if not normalized then return false end
+  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
+    if az5pdNormalizeJobName(allowed) == normalized then
+      return true
+    end
+  end
+  return false
+end
+
+
+local function normalizeJobValue(job)
+    if type(job) == "table" then
+        return job.name or job.job or job.id or nil
+    end
+    if job == nil then return nil end
+    return tostring(job)
+end
+
+local function getPlayerJobSafe(src)
+    if type(GetResourceState) == "function" and GetResourceState("Az-Framework") ~= "started" then
+        return nil
+    end
+
+    local ok, job = pcall(function()
+        return exports["Az-Framework"]:getPlayerJob(src)
+    end)
+    if not ok then return nil end
+    return normalizeJobValue(job)
+end
+
 RegisterNetEvent("AzFR:requestPlayerJob", function()
     local src = source
-    local job = exports["Az-Framework"]:getPlayerJob(src)
+    local job = getPlayerJobSafe(src)
     TriggerClientEvent("AzFR:responsePlayerJob", src, job)
 end)
 
@@ -15,15 +62,179 @@ local function isJobAllowed(job)
 end
 
 local function getPlayerJob(src)
-    return exports["Az-Framework"]:getPlayerJob(src)
+    return getPlayerJobSafe(src)
 end
 
 local CalloutTemplates = {}
 local ActiveCallouts = {}
 local pendingPosRequests = {}
+local log
 math.randomseed(os and os.time() or GetGameTimer())
+local mdtBridgeByCallout = {}
+local startedStatusLoops = {}
 
-local function log(fmt, ...)
+local function getPlayerNameSafe(src)
+    return tostring(GetPlayerName(src) or ("Player" .. tostring(src)))
+end
+
+local function getAssignedCalloutByPlayer(src)
+    for _, inst in pairs(ActiveCallouts) do
+        if inst and inst.status == "ASSIGNED" and tostring(inst.assignedTo) == tostring(src) then
+            return inst
+        end
+    end
+    return nil
+end
+
+local function formatCalloutLocation(coords)
+    if not coords or coords.x == nil or coords.y == nil then return "Unknown location" end
+    return ("Near %.0f / %.0f"):format(tonumber(coords.x) or 0.0, tonumber(coords.y) or 0.0)
+end
+
+local function getSupportedMDTResourceNames()
+    local out, seen = {}, {}
+    local function add(name)
+        name = tostring(name or '')
+        if name == '' or seen[name] then return end
+        seen[name] = true
+        out[#out + 1] = name
+    end
+
+    local cfg = Config and Config.Callouts or {}
+    add(cfg.mdtResource)
+    if type(cfg.mdtResourceFallbacks) == 'table' then
+        for _, name in ipairs(cfg.mdtResourceFallbacks) do add(name) end
+    end
+    add('az_mdt')
+    add('Az-MDT')
+    add('Az-Mdt-Standalone')
+    return out
+end
+
+local function resolveMDTResourceName()
+    if not (Config and Config.Callouts) or Config.Callouts.syncToMDT == false or not GetResourceState then return nil end
+    for _, name in ipairs(getSupportedMDTResourceNames()) do
+        if name ~= '' and GetResourceState(name) == 'started' then
+            return name
+        end
+    end
+    if GetNumResources and GetResourceByFindIndex then
+        for i = 0, GetNumResources() - 1 do
+            local name = GetResourceByFindIndex(i)
+            local low = tostring(name or ''):lower()
+            if low ~= '' and (low:find('az%-mdt', 1, false) or low:find('az_mdt', 1, true)) and GetResourceState(name) == 'started' then
+                return name
+            end
+        end
+    end
+    return nil
+end
+
+local function isMDTResourceName(name)
+    name = tostring(name or '')
+    for _, candidate in ipairs(getSupportedMDTResourceNames()) do
+        if candidate == name then return true end
+    end
+    return false
+end
+
+local function hasMDTBridge()
+    return resolveMDTResourceName() ~= nil
+end
+
+local function syncCalloutCreateToMDT(inst)
+    if not inst or inst.mdtCallId then return end
+    local mdtResource = resolveMDTResourceName()
+    if not mdtResource then return end
+    local ok, result = pcall(function()
+        return exports[mdtResource]:CreateExternalCall({
+            caller = 'Dispatch',
+            message = ('[%s] %s'):format(tostring(inst.template or 'callout'), tostring(inst.description or inst.title or 'Callout')),
+            location = formatCalloutLocation(inst.coords),
+            coords = inst.coords,
+            status = inst.mdtStatus or (inst.status == 'ASSIGNED' and 'ENROUTE' or 'PENDING'),
+            type = '5PD',
+            source = 'Az-5PD',
+            externalResource = GetCurrentResourceName(),
+            metadata = { calloutId = tostring(inst.id), template = tostring(inst.template or ''), title = tostring(inst.title or 'Callout') }
+        })
+    end)
+    if ok and result then
+        inst.mdtCallId = tonumber(result) or result
+        mdtBridgeByCallout[tostring(inst.id)] = inst.mdtCallId
+        log('MDT bridge create ok callout=%s mdt=%s resource=%s', tostring(inst.id), tostring(inst.mdtCallId), tostring(mdtResource))
+    elseif not ok then
+        log('MDT bridge create failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(result))
+    end
+end
+
+local function syncCalloutUpdateToMDT(inst, status)
+    if not inst or not inst.mdtCallId then return end
+    inst.mdtStatus = status or inst.mdtStatus or (inst.status == 'ASSIGNED' and 'ENROUTE' or 'PENDING')
+    local mdtResource = resolveMDTResourceName()
+    if not mdtResource then return end
+    local ok, err = pcall(function()
+        exports[mdtResource]:UpdateExternalCall(inst.mdtCallId, {
+            caller = inst.assignedTo and getPlayerNameSafe(inst.assignedTo) or 'Dispatch',
+            message = ('[%s] %s'):format(tostring(inst.template or 'callout'), tostring(inst.description or inst.title or 'Callout')),
+            location = formatCalloutLocation(inst.coords),
+            coords = inst.coords,
+            status = inst.mdtStatus
+        })
+    end)
+    if not ok then log('MDT bridge update failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(err)) end
+end
+
+local function syncCalloutAttachToMDT(inst, src)
+    if not inst or not inst.mdtCallId or not src then return end
+    local mdtResource = resolveMDTResourceName()
+    if not mdtResource then return end
+    local ok, err = pcall(function() exports[mdtResource]:AttachUnitToExternalCall(inst.mdtCallId, src, true) end)
+    if not ok then log('MDT bridge attach failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(err)) end
+end
+
+local function syncUnitStatusToMDT(src, status)
+    if not src or src == 0 or not (Config and Config.Callouts) or Config.Callouts.syncUnitStatusToMDT == false then return end
+    local mdtResource = resolveMDTResourceName()
+    if not mdtResource then return end
+    local ok, err = pcall(function()
+        return exports[mdtResource]:SetUnitStatusFromExternal(src, status, {})
+    end)
+    if not ok then log('MDT bridge unit status failed for src=%s via %s: %s', tostring(src), tostring(mdtResource), tostring(err)) end
+end
+
+local function syncCalloutDeleteFromMDT(inst)
+    if not inst or not inst.mdtCallId then return end
+    if inst.assignedTo then
+        syncUnitStatusToMDT(inst.assignedTo, 'AVAILABLE')
+    end
+    local mdtResource = resolveMDTResourceName()
+    if mdtResource then
+        local ok, err = pcall(function() exports[mdtResource]:DeleteExternalCall(inst.mdtCallId) end)
+        if not ok then log('MDT bridge delete failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(err)) end
+    end
+    mdtBridgeByCallout[tostring(inst.id)] = nil
+    inst.mdtCallId = nil
+end
+
+local function resyncAllCalloutsToMDT()
+    local mdtResource = resolveMDTResourceName()
+    if not mdtResource then return end
+    for _, inst in pairs(ActiveCallouts) do
+        if inst then
+            inst.mdtCallId = nil
+            mdtBridgeByCallout[tostring(inst.id)] = nil
+            syncCalloutCreateToMDT(inst)
+            syncCalloutUpdateToMDT(inst, inst.mdtStatus or (inst.status == 'ASSIGNED' and 'ENROUTE' or 'PENDING'))
+            if inst.status == 'ASSIGNED' and inst.assignedTo then
+                syncCalloutAttachToMDT(inst, inst.assignedTo)
+            end
+        end
+    end
+    log('MDT bridge resynced %s active callout(s) to %s', tostring((function() local n=0 for _ in pairs(ActiveCallouts) do n=n+1 end return n end)()), tostring(mdtResource))
+end
+
+log = function(fmt, ...)
     local ok, s = pcall(string.format, fmt, ...)
     if ok and s then print(("[callouts] %s"):format(s)) else print("[callouts] (log format error)") end
 end
@@ -135,7 +346,8 @@ local function makeInstanceFromTemplate(template, coords)
         clientScript = nil,
         awaitingStatus = false,
         lastStatusResponse = nil,
-        backupRequests = {}
+        backupRequests = {},
+        mdtStatus = 'PENDING'
     }
 
     if template.client and type(template.client.script) == "string" then
@@ -149,6 +361,7 @@ end
 
 local function broadcastInstance(inst)
     ActiveCallouts[inst.id] = inst
+    syncCalloutCreateToMDT(inst)
     TriggerClientEvent("callouts:new", -1, {
         id = inst.id,
         template = inst.template,
@@ -238,110 +451,113 @@ RegisterCommand("callout_list", function()
     for k, _ in pairs(CalloutTemplates) do print(" - " .. k) end
 end, false)
 
+local function startStatusLoopForCallout(calloutId)
+    local key = tostring(calloutId or '')
+    if key == '' or startedStatusLoops[key] then return end
+    startedStatusLoops[key] = true
+    Citizen.CreateThread(function()
+        while ActiveCallouts[key] and ActiveCallouts[key].status == "ASSIGNED" do
+            local inst = ActiveCallouts[key]
+            local tick = GetGameTimer()
+            while GetGameTimer() - tick < 60000 do
+                Citizen.Wait(500)
+                if not ActiveCallouts[key] or ActiveCallouts[key].status ~= "ASSIGNED" then startedStatusLoops[key] = nil return end
+            end
+            inst = ActiveCallouts[key]
+            if not inst or inst.status ~= "ASSIGNED" then startedStatusLoops[key] = nil return end
+            inst.awaitingStatus = true
+            log("sending status_check for callout %s to player %s", inst.id, tostring(inst.assignedTo))
+            while ActiveCallouts[key] and ActiveCallouts[key].status == "ASSIGNED" and ActiveCallouts[key].awaitingStatus do
+                TriggerClientEvent("callouts:status_check", inst.assignedTo, {id = inst.id, title = inst.title, description = inst.description})
+                Citizen.Wait(10000)
+            end
+            if not ActiveCallouts[key] then startedStatusLoops[key] = nil return end
+            ActiveCallouts[key].awaitingStatus = false
+        end
+        startedStatusLoops[key] = nil
+    end)
+end
+
+local function finalizeAssignment(inst, src, extra)
+    if not inst or not src then return false end
+    extra = extra or {}
+    inst.status = "ASSIGNED"
+    inst.assignedTo = src
+    inst.assignedAt = GetGameTimer()
+    inst.mdtStatus = extra.mdtStatus or inst.mdtStatus or 'ENROUTE'
+
+    local acceptedPayload = { id = inst.id, template = inst.template, title = inst.title, assignedTo = inst.assignedTo, coords = inst.coords }
+    if extra.origLocalId then acceptedPayload.origLocalId = extra.origLocalId end
+    TriggerClientEvent("callouts:accepted", -1, acceptedPayload)
+    TriggerClientEvent("callouts:open_menu", inst.assignedTo, inst.id)
+
+    local spawnPacket = { id = inst.id, template = inst.template, title = inst.title, description = inst.description, coords = inst.coords, clientScript = inst.clientScript }
+    TriggerClientEvent("callouts:spawn_entities", -1, spawnPacket)
+    local acceptName = getPlayerNameSafe(src)
+    TriggerClientEvent("callouts:player_update", -1, { id = inst.id, action = "accepted", player = src, name = acceptName, timestamp = GetGameTimer() })
+    if not inst.mdtCallId then syncCalloutCreateToMDT(inst) end
+    syncCalloutUpdateToMDT(inst, extra.mdtStatus or 'ENROUTE')
+    syncCalloutAttachToMDT(inst, src)
+    syncUnitStatusToMDT(src, extra.mdtStatus or 'ENROUTE')
+    startStatusLoopForCallout(inst.id)
+    log("instance %s assigned to %d and spawn packet sent", inst.id, src)
+    dumpActiveServer()
+    return true
+end
+
 RegisterNetEvent("callouts:accept")
 AddEventHandler("callouts:accept", function(calloutIdArg)
     local src = source
     local job = getPlayerJob(src)
-    if not isJobAllowed(job) then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED")
-        log("player %d not allowed to accept", src)
-        return
-    end
-
+    if not isJobAllowed(job) then TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED") return end
     local calloutId = tostring(calloutIdArg)
-    log("SERVER player %s requested accept callout %s", tostring(src), calloutId)
     local inst = getInstance(calloutId)
-    if not inst then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_FOUND")
-        log("player %d attempted to accept non-existing callout %s", src, tostring(calloutIdArg))
-        dumpActiveServer()
-        return
-    end
-    if inst.status ~= "ACTIVE" then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_ACTIVE")
-        log("player %d attempted to accept callout %s not ACTIVE (status=%s)", src, calloutId, tostring(inst.status))
-        dumpActiveServer()
-        return
-    end
-
-    inst.status = "ASSIGNED"
-    inst.assignedTo = src
-    inst.assignedAt = GetGameTimer()
-
-    TriggerClientEvent("callouts:accepted", -1, {
-        id = inst.id,
-        template = inst.template,
-        title = inst.title,
-        assignedTo = inst.assignedTo,
-        coords = inst.coords
-    })
-    TriggerClientEvent("callouts:open_menu", inst.assignedTo, inst.id)
-
-    local spawnPacket = {
-        id = inst.id, template = inst.template, title = inst.title, description = inst.description,
-        coords = inst.coords, clientScript = inst.clientScript
-    }
-    TriggerClientEvent("callouts:spawn_entities", -1, spawnPacket)
-    log("instance %s assigned to %d and spawn packet sent", inst.id, src)
-
-    local acceptName = tostring(GetPlayerName(src) or ("Player" .. tostring(src)))
-    TriggerClientEvent("callouts:player_update", -1, { id = inst.id, action = "accepted", player = src, name = acceptName, timestamp = GetGameTimer() })
-
-    Citizen.CreateThread(function()
-        while ActiveCallouts[inst.id] and ActiveCallouts[inst.id].status == "ASSIGNED" do
-            local tick = GetGameTimer()
-            while GetGameTimer() - tick < 60000 do
-                Citizen.Wait(500)
-                if not ActiveCallouts[inst.id] or ActiveCallouts[inst.id].status ~= "ASSIGNED" then return end
-            end
-            if not ActiveCallouts[inst.id] or ActiveCallouts[inst.id].status ~= "ASSIGNED" then return end
-            ActiveCallouts[inst.id].awaitingStatus = true
-            log("sending status_check for callout %s to player %s", inst.id, tostring(inst.assignedTo))
-            while ActiveCallouts[inst.id] and ActiveCallouts[inst.id].status == "ASSIGNED" and ActiveCallouts[inst.id].awaitingStatus do
-                TriggerClientEvent("callouts:status_check", inst.assignedTo, {id = inst.id, title = inst.title, description = inst.description})
-                Citizen.Wait(10000)
-            end
-            if not ActiveCallouts[inst.id] then return end
-            ActiveCallouts[inst.id].awaitingStatus = false
+    if not inst then TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_FOUND") dumpActiveServer() return end
+    if inst.status == "ASSIGNED" then
+        if tostring(inst.assignedTo) == tostring(src) then
+            TriggerClientEvent("callouts:accepted", src, { id = inst.id, template = inst.template, title = inst.title, assignedTo = inst.assignedTo, coords = inst.coords })
+            TriggerClientEvent("callouts:open_menu", src, inst.id)
+            if not inst.mdtCallId then syncCalloutCreateToMDT(inst) end
+            syncCalloutUpdateToMDT(inst, inst.mdtStatus or 'ENROUTE')
+            syncCalloutAttachToMDT(inst, src)
+            syncUnitStatusToMDT(src, inst.mdtStatus or 'ENROUTE')
+            return
         end
-    end)
-
-    dumpActiveServer()
+        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "ALREADY_TAKEN")
+        return
+    end
+    if inst.status ~= "ACTIVE" then TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_ACTIVE") dumpActiveServer() return end
+    local existing = getAssignedCalloutByPlayer(src)
+    if existing and tostring(existing.id) ~= calloutId then
+        TriggerClientEvent("callouts:accepted", src, { id = existing.id, template = existing.template, title = existing.title, assignedTo = existing.assignedTo, coords = existing.coords })
+        TriggerClientEvent("callouts:open_menu", src, existing.id)
+        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "ALREADY_ASSIGNED")
+        return
+    end
+    finalizeAssignment(inst, src, { mdtStatus = 'ENROUTE' })
 end)
 
 RegisterNetEvent("callouts:accept_local")
 AddEventHandler("callouts:accept_local", function(smallInst)
     local src = source
     local job = getPlayerJob(src)
-    if not isJobAllowed(job) then
-        TriggerClientEvent("callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "NOT_AUTHORIZED")
+    if not isJobAllowed(job) then TriggerClientEvent("callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "NOT_AUTHORIZED") return end
+    if not smallInst or not smallInst.template then return end
+    local existing = getAssignedCalloutByPlayer(src)
+    if existing then
+        TriggerClientEvent("callouts:accepted", src, { id = existing.id, template = existing.template, title = existing.title, assignedTo = existing.assignedTo, coords = existing.coords })
+        TriggerClientEvent("callouts:open_menu", src, existing.id)
+        TriggerClientEvent("callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "ALREADY_ASSIGNED")
         return
     end
-    if not smallInst or not smallInst.template then log("accept_local: missing template from %d", src); return end
-
     local tmplName = tostring(smallInst.template):gsub("%.callout$", "")
     local tmpl = CalloutTemplates[tmplName]
-    if not tmpl then log("accept_local: unknown template '%s' from %d", tostring(smallInst.template), src); return end
-
+    if not tmpl then return end
     local inst = makeInstanceFromTemplate(tmpl, smallInst.coords)
-    if not inst then log("accept_local: failed to make instance for %s", tmplName); return end
-
-    inst.status     = "ASSIGNED"
-    inst.assignedTo = src
-    inst.assignedAt = GetGameTimer()
+    if not inst then return end
     ActiveCallouts[inst.id] = inst
-
-    TriggerClientEvent("callouts:accepted", -1, {
-        id = inst.id, template = inst.template, title = inst.title, assignedTo = inst.assignedTo,
-        coords = inst.coords, origLocalId = smallInst._originLocalId
-    })
-    TriggerClientEvent("callouts:open_menu", inst.assignedTo, inst.id)
-
-    local spawnPacket = { id = inst.id, template = inst.template, title = inst.title, description = inst.description, coords = inst.coords, clientScript = inst.clientScript }
-    TriggerClientEvent("callouts:spawn_entities", -1, spawnPacket)
-
-    log("accept_local: created and assigned instance %s -> %d", inst.id, src)
-    dumpActiveServer()
+    syncCalloutCreateToMDT(inst)
+    finalizeAssignment(inst, src, { origLocalId = smallInst._originLocalId, mdtStatus = 'ENROUTE' })
 end)
 
 RegisterNetEvent("callouts:end")
@@ -369,8 +585,14 @@ AddEventHandler("callouts:end", function(calloutIdArg)
     end
 
     inst.status = "COMPLETED"
+    local releasedUnit = tonumber(inst.assignedTo) or tonumber(src) or 0
     TriggerClientEvent("callouts:ended", -1, {id = inst.id, template = inst.template, endedBy = src})
+    if releasedUnit > 0 then
+        syncUnitStatusToMDT(releasedUnit, 'AVAILABLE')
+    end
+    syncCalloutDeleteFromMDT(inst)
     ActiveCallouts[calloutId] = nil
+    startedStatusLoops[calloutId] = nil
     log("callout %s ended by %s", calloutId, tostring(src))
 end)
 
@@ -396,6 +618,13 @@ AddEventHandler("callouts:status_response", function(calloutIdArg, responseData)
     log("callout %s status_response received from %d (response: %s)", tostring(calloutId), src, tostring(responseData and responseData.response or "nil"))
     TriggerClientEvent("callouts:status_response_ack", inst.assignedTo, {id = inst.id})
     local pName = tostring(GetPlayerName(src) or ("Player" .. tostring(src)))
+    local responseKey = tostring(responseData and responseData.response or "")
+    local mdtStatus = ({ ON_SCENE = 'ONSCENE', EN_ROUTE = 'ENROUTE', NEED_ASSISTANCE = 'ASSISTANCE' })[responseKey] or 'ENROUTE'
+    local unitStatus = ({ ON_SCENE = 'ONSCENE', EN_ROUTE = 'ENROUTE', NEED_ASSISTANCE = 'ONSCENE' })[responseKey] or 'ENROUTE'
+    inst.mdtStatus = mdtStatus
+    if not inst.mdtCallId then syncCalloutCreateToMDT(inst) end
+    syncCalloutUpdateToMDT(inst, mdtStatus)
+    syncUnitStatusToMDT(src, unitStatus)
     TriggerClientEvent("callouts:player_update", -1, { id = inst.id, action = responseData and responseData.response or "status_update", player = src, name = pName, payload = responseData, timestamp = GetGameTimer() })
 end)
 
@@ -456,11 +685,58 @@ AddEventHandler("callouts:request_generate", function(smallInst)
     end
 end)
 
+Citizen.CreateThread(function()
+    while true do
+        Citizen.Wait(5000)
+        local now = GetGameTimer()
+        local expireMs = (tonumber(Config and Config.Callouts and Config.Callouts.serverExpireSeconds) or 180) * 1000
+        for id, inst in pairs(ActiveCallouts) do
+            if inst and inst.status == 'ACTIVE' and inst.createdAt and (now - inst.createdAt) >= expireMs then
+                TriggerClientEvent('callouts:cancelled', -1, { id = inst.id, title = inst.title or ('Callout ' .. tostring(id)) })
+                syncCalloutDeleteFromMDT(inst)
+                ActiveCallouts[id] = nil
+                log('expired unassigned callout %s after %d ms', tostring(id), now - inst.createdAt)
+            end
+        end
+    end
+end)
+
+exports('AssignCalloutFromMDT', function(calloutId, src)
+    src = tonumber(src) or 0
+    if src <= 0 then return false, 'INVALID_SOURCE' end
+    local job = getPlayerJob(src)
+    if not isJobAllowed(job) then return false, 'NOT_AUTHORIZED' end
+    local inst = getInstance(calloutId)
+    if not inst then return false, 'NOT_FOUND' end
+    if inst.status == 'ASSIGNED' then
+        if tostring(inst.assignedTo) == tostring(src) then
+            syncCalloutUpdateToMDT(inst, inst.mdtStatus or 'ENROUTE')
+            syncCalloutAttachToMDT(inst, src)
+            syncUnitStatusToMDT(src, inst.mdtStatus or 'ENROUTE')
+            return true, inst.id
+        end
+        return false, 'ALREADY_TAKEN'
+    end
+    local existing = getAssignedCalloutByPlayer(src)
+    if existing and tostring(existing.id) ~= tostring(calloutId) then finalizeAssignment(existing, src, { mdtStatus = 'ENROUTE' }) return false, 'ALREADY_ASSIGNED' end
+    finalizeAssignment(inst, src, { mdtStatus = 'ENROUTE' })
+    return true, inst.id
+end)
+
 AddEventHandler("onResourceStart", function(res)
-    if res ~= GetCurrentResourceName() then return end
-    math.randomseed(GetGameTimer() + (os and os.time() or 0))
-    loadAllTemplates()
-    log("ready. Use callout_spawn_random or callout_spawn <name> to test.")
+    if res == GetCurrentResourceName() then
+        math.randomseed(GetGameTimer() + (os and os.time() or 0))
+        loadAllTemplates()
+        log("ready. Use callout_spawn_random or callout_spawn <name> to test.")
+        return
+    end
+
+    if isMDTResourceName(res) then
+        CreateThread(function()
+            Wait(1500)
+            resyncAllCalloutsToMDT()
+        end)
+    end
 end)
 
 local DEFAULT_EMERGENCY_ID = "911"

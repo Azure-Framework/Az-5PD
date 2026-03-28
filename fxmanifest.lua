@@ -3,7 +3,6 @@ games { 'gta5' }
 
 author 'Azure'
 version '2.0'
-lua54 'yes'
 
 ui_page 'ui/index.html'
 
@@ -23,6 +22,7 @@ shared_scripts {
     '@ox_lib/init.lua',
     'config.lua',
     'names.lua',
+    'shared/sim_config.lua',
 }
 
 client_scripts {
@@ -31,16 +31,19 @@ client_scripts {
     'client.lua',
     'source/traffic_manager.lua',
     'source/service.lua',
-    'source/randomevents.lua'
+    'source/randomevents.lua',
+    'client/sim_tools.lua'
 }
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
     'source/server.lua',
-    'server.lua'
+    'server.lua',
+    'server/sim_core.lua'
 }
 
 dependencies {
+    'Az-Framework',
     'ox_lib',
     'ox_target',
     'oxmysql'

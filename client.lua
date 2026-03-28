@@ -1,3 +1,44 @@
+
+local function az5pdNormalizeJobName(name)
+  if name == nil then return nil end
+  return string.lower(tostring(name))
+end
+
+local function az5pdGetAllowedJobs()
+  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
+  if type(cfg) == 'table' and next(cfg) ~= nil then
+    return cfg
+  end
+  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+end
+
+function DrawText3D(x, y, z, text)
+    local onScreen, _x, _y = World3dToScreen2d(x, y, z)
+    if not onScreen then return end
+  
+    SetTextScale(0.35, 0.35)
+    SetTextFont(4)
+    SetTextProportional(1)
+    SetTextCentre(true)
+    SetTextOutline()
+    SetTextColour(255, 255, 255, 215)
+    BeginTextCommandDisplayText('STRING')
+    AddTextComponentSubstringPlayerName(text)
+    EndTextCommandDisplayText(_x, _y)
+  end
+
+local function az5pdJobAllowed(jobName)
+  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
+  local normalized = az5pdNormalizeJobName(jobName)
+  if not normalized then return false end
+  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
+    if az5pdNormalizeJobName(allowed) == normalized then
+      return true
+    end
+  end
+  return false
+end
+
 active                   = active                   or {}
 promptId                 = promptId                 or nil
 assignedCalloutsToMe     = assignedCalloutsToMe     or {}
@@ -6,6 +47,7 @@ menuActive               = menuActive               or {}
 registeredMenus          = registeredMenus          or {}
 acceptingLock            = acceptingLock            or {}
 pendingAction            = pendingAction            or {}  -- track in-flight actions
+dismissedCallouts       = dismissedCallouts       or {}
 
 local END_DISTANCE_THRESHOLD = 75.0         -- must be near to end (short H)
 local STATUS_CHECK_TIMEOUT   = 30000        -- ms for status check popup
@@ -14,6 +56,654 @@ local FORCE_HOLD_MS          = 5000         -- hold H for 5s to force-end locall
 local hHoldStart             = nil
 
 local registerCalloutMenusOnce, openCalloutContextMenu, showActiveListMenu
+
+
+
+local LightTester = {
+    flash = {
+        running = false,
+        interval = 250,
+        selected = {}
+    },
+    lightMode = {},
+    fullbeam = {},
+    indicators = {}
+}
+
+local lightModeLabels = {
+    [0] = 'Normal',
+    [1] = 'Force Off',
+    [2] = 'Force On'
+}
+
+local showMainMenu, showBaseMenu, showExtrasMenu, showFlashMenu
+local buildMainMenu, buildBaseMenu, buildExtrasMenu, buildFlashMenu
+
+local function notify(msg, msgType)
+    lib.notify({
+        title = 'Light Tester',
+        description = msg,
+        type = msgType or 'inform'
+    })
+end
+
+local function getVeh()
+    local ped = PlayerPedId()
+
+    if not IsPedInAnyVehicle(ped, false) then
+        notify('Get in a vehicle first.', 'error')
+        return nil
+    end
+
+    local veh = GetVehiclePedIsIn(ped, false)
+    if veh == 0 then
+        notify('No current vehicle found.', 'error')
+        return nil
+    end
+
+    return veh
+end
+
+local function getVehKey(veh)
+    return tostring(veh)
+end
+
+local function getVehName(veh)
+    local model = GetEntityModel(veh)
+    local display = GetDisplayNameFromVehicleModel(model)
+    local label = GetLabelText(display)
+
+    if not label or label == 'NULL' or label == '' then
+        label = display
+    end
+
+    if not label or label == '' then
+        label = ('Model %s'):format(model)
+    end
+
+    return label
+end
+
+local function getExtras(veh)
+    local extras = {}
+
+    for extraId = 1, 20 do
+        if DoesExtraExist(veh, extraId) then
+            extras[#extras + 1] = extraId
+        end
+    end
+
+    return extras
+end
+
+local function hasSelectedFlashExtras()
+    return next(LightTester.flash.selected) ~= nil
+end
+
+local function getFlashExtrasForVehicle(veh)
+    local extras = {}
+
+    if hasSelectedFlashExtras() then
+        for extraId, enabled in pairs(LightTester.flash.selected) do
+            if enabled and DoesExtraExist(veh, extraId) then
+                extras[#extras + 1] = extraId
+            end
+        end
+    else
+        extras = getExtras(veh)
+    end
+
+    table.sort(extras)
+    return extras
+end
+
+local function setExtraEnabled(veh, extraId, enabled)
+    if not DoesExtraExist(veh, extraId) then
+        return
+    end
+
+    -- native uses "disable", so invert enabled -> disable
+    SetVehicleExtra(veh, extraId, not enabled)
+end
+
+local function setAllExtras(veh, enabled)
+    for _, extraId in ipairs(getExtras(veh)) do
+        setExtraEnabled(veh, extraId, enabled)
+    end
+end
+
+local function reopenMenu(menuFn)
+    CreateThread(function()
+        Wait(75)
+        menuFn()
+    end)
+end
+
+local function cycleLightMode(veh)
+    local key = getVehKey(veh)
+    local current = LightTester.lightMode[key] or 0
+    local newMode = (current + 1) % 3
+
+    LightTester.lightMode[key] = newMode
+    SetVehicleLights(veh, newMode)
+
+    return newMode
+end
+
+local function ensureIndicatorState(veh)
+    local key = getVehKey(veh)
+
+    if not LightTester.indicators[key] then
+        LightTester.indicators[key] = {
+            left = false,
+            right = false
+        }
+    end
+
+    return LightTester.indicators[key]
+end
+
+local function stopFlasher(veh)
+    LightTester.flash.running = false
+
+    if veh and DoesEntityExist(veh) then
+        for _, extraId in ipairs(getFlashExtrasForVehicle(veh)) do
+            setExtraEnabled(veh, extraId, true)
+        end
+    end
+end
+
+local function startFlasher(veh)
+    if LightTester.flash.running then
+        notify('Flasher is already running.', 'error')
+        return
+    end
+
+    local extras = getFlashExtrasForVehicle(veh)
+    if #extras == 0 then
+        notify('No extras found on this vehicle.', 'error')
+        return
+    end
+
+    LightTester.flash.running = true
+
+    CreateThread(function()
+        local phase = false
+
+        while LightTester.flash.running do
+            if not DoesEntityExist(veh) then
+                break
+            end
+
+            if GetVehiclePedIsIn(PlayerPedId(), false) ~= veh then
+                break
+            end
+
+            extras = getFlashExtrasForVehicle(veh)
+            if #extras == 0 then
+                break
+            end
+
+            phase = not phase
+
+            if #extras == 1 then
+                setExtraEnabled(veh, extras[1], phase)
+            else
+                for index, extraId in ipairs(extras) do
+                    local enable = (index % 2 == 1) and phase or not phase
+                    setExtraEnabled(veh, extraId, enable)
+                end
+            end
+
+            Wait(LightTester.flash.interval)
+        end
+
+        LightTester.flash.running = false
+
+        if DoesEntityExist(veh) then
+            for _, extraId in ipairs(extras) do
+                setExtraEnabled(veh, extraId, true)
+            end
+        end
+    end)
+end
+
+local function configureFlasher()
+    local veh = getVeh()
+    if not veh then return end
+
+    local extras = getExtras(veh)
+    local options = {}
+    local defaults = {}
+
+    for _, extraId in ipairs(extras) do
+        local value = tostring(extraId)
+
+        options[#options + 1] = {
+            value = value,
+            label = ('Extra %d'):format(extraId)
+        }
+
+        if LightTester.flash.selected[extraId] then
+            defaults[#defaults + 1] = value
+        end
+    end
+
+    local input = lib.inputDialog('Flasher Settings', {
+        {
+            type = 'number',
+            label = 'Flash interval (ms)',
+            description = 'Lower = faster',
+            default = LightTester.flash.interval,
+            min = 50,
+            max = 2000,
+            required = true
+        },
+        {
+            type = 'multi-select',
+            label = 'Flash extras',
+            description = 'Leave empty to use all detected extras',
+            options = options,
+            default = defaults
+        }
+    })
+
+    if not input then
+        return
+    end
+
+    local interval = tonumber(input[1])
+    if interval then
+        LightTester.flash.interval = math.floor(interval)
+    end
+
+    LightTester.flash.selected = {}
+
+    local selected = input[2] or {}
+    for _, value in ipairs(selected) do
+        local extraId = tonumber(value)
+        if extraId then
+            LightTester.flash.selected[extraId] = true
+        end
+    end
+
+    notify(('Updated flasher interval to %sms.'):format(LightTester.flash.interval), 'success')
+end
+
+buildBaseMenu = function(veh)
+    local key = getVehKey(veh)
+    local indicators = ensureIndicatorState(veh)
+    local fullbeam = LightTester.fullbeam[key] or false
+    local lightMode = LightTester.lightMode[key] or 0
+
+    lib.registerContext({
+        id = 'light_tester_base',
+        title = ('Base Lights • %s'):format(getVehName(veh)),
+        menu = 'light_tester_main',
+        options = {
+            {
+                title = 'Toggle siren state',
+                description = IsVehicleSirenOn(veh) and 'Currently ON' or 'Currently OFF',
+                icon = 'bullhorn',
+                onSelect = function()
+                    SetVehicleSiren(veh, not IsVehicleSirenOn(veh))
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle siren audio',
+                description = IsVehicleSirenAudioOn(veh) and 'Audio ON' or 'Audio MUTED',
+                icon = 'volume-high',
+                onSelect = function()
+                    local audioOn = IsVehicleSirenAudioOn(veh)
+                    SetVehicleHasMutedSirens(veh, audioOn)
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Emergency lights only',
+                description = 'Turns siren lights on and mutes the siren sound',
+                icon = 'triangle-exclamation',
+                onSelect = function()
+                    SetVehicleSiren(veh, true)
+                    SetVehicleHasMutedSirens(veh, true)
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = ('Cycle light mode: %s'):format(lightModeLabels[lightMode]),
+                description = 'Normal / Force Off / Force On',
+                icon = 'lightbulb',
+                onSelect = function()
+                    local newMode = cycleLightMode(veh)
+                    notify(('Light mode: %s'):format(lightModeLabels[newMode]), 'success')
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle interior light',
+                description = IsVehicleInteriorLightOn(veh) and 'Currently ON' or 'Currently OFF',
+                icon = 'car-side',
+                onSelect = function()
+                    SetVehicleInteriorlight(veh, not IsVehicleInteriorLightOn(veh))
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle full beam',
+                description = fullbeam and 'Currently ON' or 'Currently OFF',
+                icon = 'sun',
+                onSelect = function()
+                    local newState = not (LightTester.fullbeam[key] or false)
+                    LightTester.fullbeam[key] = newState
+                    SetVehicleFullbeam(veh, newState)
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle left indicator',
+                description = indicators.left and 'Currently ON' or 'Currently OFF',
+                icon = 'arrow-left',
+                onSelect = function()
+                    indicators.left = not indicators.left
+                    SetVehicleIndicatorLights(veh, 1, indicators.left)
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle right indicator',
+                description = indicators.right and 'Currently ON' or 'Currently OFF',
+                icon = 'arrow-right',
+                onSelect = function()
+                    indicators.right = not indicators.right
+                    SetVehicleIndicatorLights(veh, 0, indicators.right)
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle hazards',
+                description = (indicators.left and indicators.right) and 'Currently ON' or 'Currently OFF',
+                icon = 'car-burst',
+                onSelect = function()
+                    local toggle = not (indicators.left and indicators.right)
+                    indicators.left = toggle
+                    indicators.right = toggle
+                    SetVehicleIndicatorLights(veh, 1, toggle)
+                    SetVehicleIndicatorLights(veh, 0, toggle)
+                    reopenMenu(showBaseMenu)
+                end
+            },
+            {
+                title = 'Toggle searchlight',
+                description = IsVehicleSearchlightOn(veh) and 'Currently ON' or 'Currently OFF',
+                icon = 'magnifying-glass',
+                onSelect = function()
+                    SetVehicleSearchlight(veh, not IsVehicleSearchlightOn(veh), false)
+                    reopenMenu(showBaseMenu)
+                end
+            }
+        }
+    })
+end
+
+buildExtrasMenu = function(veh)
+    local options = {
+        {
+            title = 'Enable all extras',
+            description = 'Turns every detected extra ON',
+            icon = 'power-off',
+            onSelect = function()
+                setAllExtras(veh, true)
+                reopenMenu(showExtrasMenu)
+            end
+        },
+        {
+            title = 'Disable all extras',
+            description = 'Turns every detected extra OFF',
+            icon = 'ban',
+            onSelect = function()
+                setAllExtras(veh, false)
+                reopenMenu(showExtrasMenu)
+            end
+        }
+    }
+
+    local extras = getExtras(veh)
+
+    if #extras == 0 then
+        options[#options + 1] = {
+            title = 'No extras found',
+            description = 'This model does not appear to expose extras 1-20',
+            icon = 'circle-info',
+            readOnly = true
+        }
+    else
+        for _, extraId in ipairs(extras) do
+            local isOn = IsVehicleExtraTurnedOn(veh, extraId)
+            local isSelected = LightTester.flash.selected[extraId] == true
+
+            options[#options + 1] = {
+                title = ('Extra %d'):format(extraId),
+                description = ('State: %s • Flasher: %s'):format(
+                    isOn and 'ON' or 'OFF',
+                    isSelected and 'Selected' or 'Not selected'
+                ),
+                icon = 'toggle-on',
+                progress = isOn and 100 or 0,
+                colorScheme = isOn and 'green' or 'gray',
+                metadata = {
+                    { label = 'Extra ID', value = extraId },
+                    { label = 'Current state', value = isOn and 'ON' or 'OFF' },
+                    { label = 'Flasher selection', value = isSelected and 'Yes' or 'No' }
+                },
+                onSelect = function()
+                    setExtraEnabled(veh, extraId, not isOn)
+                    reopenMenu(showExtrasMenu)
+                end
+            }
+        end
+    end
+
+    lib.registerContext({
+        id = 'light_tester_extras',
+        title = ('Extras • %s'):format(getVehName(veh)),
+        menu = 'light_tester_main',
+        options = options
+    })
+end
+
+buildFlashMenu = function(veh)
+    local selectedExtras = getFlashExtrasForVehicle(veh)
+    local selectedText
+
+    if hasSelectedFlashExtras() then
+        if #selectedExtras > 0 then
+            selectedText = table.concat(selectedExtras, ', ')
+        else
+            selectedText = 'None'
+        end
+    else
+        selectedText = 'All available extras'
+    end
+
+    lib.registerContext({
+        id = 'light_tester_flash',
+        title = ('Flasher • %s'):format(getVehName(veh)),
+        menu = 'light_tester_main',
+        options = {
+            {
+                title = 'Start flasher',
+                description = ('Interval: %sms'):format(LightTester.flash.interval),
+                icon = 'play',
+                onSelect = function()
+                    startFlasher(veh)
+                    reopenMenu(showFlashMenu)
+                end
+            },
+            {
+                title = 'Stop flasher',
+                description = 'Stops flashing and leaves involved extras ON',
+                icon = 'stop',
+                onSelect = function()
+                    stopFlasher(veh)
+                    reopenMenu(showFlashMenu)
+                end
+            },
+            {
+                title = 'Configure flasher',
+                description = 'Set speed and choose which extras flash',
+                icon = 'sliders',
+                metadata = {
+                    { label = 'Interval', value = ('%sms'):format(LightTester.flash.interval) },
+                    { label = 'Selected extras', value = selectedText }
+                },
+                onSelect = function()
+                    configureFlasher()
+                    reopenMenu(showFlashMenu)
+                end
+            },
+            {
+                title = 'Clear flash-extra selection',
+                description = 'Reverts flashing to all detected extras',
+                icon = 'eraser',
+                onSelect = function()
+                    LightTester.flash.selected = {}
+                    notify('Flash-extra selection cleared. Using all extras.', 'success')
+                    reopenMenu(showFlashMenu)
+                end
+            }
+        }
+    })
+end
+
+buildMainMenu = function(veh)
+    buildBaseMenu(veh)
+    buildExtrasMenu(veh)
+    buildFlashMenu(veh)
+
+    local extras = getExtras(veh)
+    local flashExtras = getFlashExtrasForVehicle(veh)
+    local flashText = hasSelectedFlashExtras()
+        and (#flashExtras > 0 and table.concat(flashExtras, ', ') or 'None')
+        or 'All available extras'
+
+    lib.registerContext({
+        id = 'light_tester_main',
+        title = ('Light Tester • %s'):format(getVehName(veh)),
+        options = {
+            {
+                title = ('Plate: %s'):format((GetVehicleNumberPlateText(veh) or ''):gsub('^%s*(.-)%s*$', '%1')),
+                description = 'Current vehicle info',
+                icon = 'car',
+                readOnly = true,
+                metadata = {
+                    { label = 'Vehicle', value = getVehName(veh) },
+                    { label = 'Detected extras', value = #extras },
+                    { label = 'Flasher interval', value = ('%sms'):format(LightTester.flash.interval) },
+                    { label = 'Flasher extras', value = flashText }
+                }
+            },
+            {
+                title = 'Base vehicle lights',
+                description = 'Siren, light mode, interior, indicators, searchlight',
+                menu = 'light_tester_base',
+                icon = 'lightbulb'
+            },
+            {
+                title = 'Vehicle extras',
+                description = (#extras > 0)
+                    and ('Found %d extra(s)'):format(#extras)
+                    or 'No extras detected',
+                menu = 'light_tester_extras',
+                icon = 'sitemap'
+            },
+            {
+                title = 'Flasher',
+                description = 'Test wigwag/flash speed using selected extras',
+                menu = 'light_tester_flash',
+                icon = 'bolt'
+            },
+            {
+                title = 'Reset tester state',
+                description = 'Stops flasher and clears tester-side states',
+                icon = 'rotate-left',
+                onSelect = function()
+                    local key = getVehKey(veh)
+
+                    stopFlasher(veh)
+
+                    LightTester.lightMode[key] = 0
+                    LightTester.fullbeam[key] = false
+                    LightTester.indicators[key] = {
+                        left = false,
+                        right = false
+                    }
+
+                    SetVehicleLights(veh, 0)
+                    SetVehicleFullbeam(veh, false)
+                    SetVehicleIndicatorLights(veh, 1, false)
+                    SetVehicleIndicatorLights(veh, 0, false)
+                    SetVehicleHasMutedSirens(veh, false)
+                    SetVehicleInteriorlight(veh, false)
+
+                    notify('Tester state reset for this vehicle.', 'success')
+                    reopenMenu(showMainMenu)
+                end
+            }
+        }
+    })
+end
+
+showMainMenu = function()
+    local veh = getVeh()
+    if not veh then return end
+
+    buildMainMenu(veh)
+    lib.showContext('light_tester_main')
+end
+
+showBaseMenu = function()
+    local veh = getVeh()
+    if not veh then return end
+
+    buildBaseMenu(veh)
+    lib.showContext('light_tester_base')
+end
+
+showExtrasMenu = function()
+    local veh = getVeh()
+    if not veh then return end
+
+    buildExtrasMenu(veh)
+    lib.showContext('light_tester_extras')
+end
+
+showFlashMenu = function()
+    local veh = getVeh()
+    if not veh then return end
+
+    buildFlashMenu(veh)
+    lib.showContext('light_tester_flash')
+end
+
+RegisterCommand('lighttest', function()
+    showMainMenu()
+end, false)
+
+RegisterKeyMapping('lighttest', 'Open vehicle light tester', 'keyboard', 'F7')
+
+AddEventHandler('onResourceStop', function(resourceName)
+    if resourceName ~= GetCurrentResourceName() then
+        return
+    end
+
+    local veh = GetVehiclePedIsIn(PlayerPedId(), false)
+    if veh and veh ~= 0 then
+        stopFlasher(veh)
+    else
+        LightTester.flash.running = false
+    end
+end)
 
 local function isJobAllowed(job)
     if not job then return false end
@@ -74,8 +764,28 @@ Citizen.CreateThread(function()
         end
 
         local function doNotify(args)
+            args = args or {}
             if type(lib) == "table" and type(lib.notify) == "function" then
-                pcall(lib.notify, args)
+                local payload = {
+                    id = args.id,
+                    title = args.title or "Callout",
+                    description = args.description or "",
+                    type = args.type or "inform",
+                    icon = args.icon,
+                    iconColor = args.iconColor,
+                    position = args.position or "top-right",
+                    duration = tonumber(args.duration) or 4500,
+                    showDuration = args.showDuration ~= false,
+                    style = {
+                        backgroundColor = '#111827',
+                        color = '#f9fafb',
+                        boxShadow = 'none',
+                        border = '1px solid rgba(255,255,255,0.08)',
+                        ['.description'] = { color = '#d1d5db' },
+                        ['.title'] = { color = '#ffffff' }
+                    }
+                }
+                pcall(lib.notify, payload)
             else
                 local title = args.title or ""
                 local desc = args.description or ""
@@ -157,7 +867,31 @@ Citizen.CreateThread(function()
             assignedCalloutsToMe[idstr] = nil
             pendingStatusChecks[idstr] = nil
             menuActive[idstr] = nil
+            dismissedCallouts[idstr] = nil
             if promptId == idstr then promptId = nil end
+        end
+
+        local function dismissLocalCallout(idstr, why)
+            local e = active[idstr]
+            if e then
+                e.dismissed = true
+                e.acceptPending = nil
+                if e.blip and DoesBlipExist(e.blip) then
+                    SetBlipRoute(e.blip, false)
+                    SetBlipFlashes(e.blip, false)
+                    SetBlipColour(e.blip, 5)
+                end
+            end
+            dismissedCallouts[idstr] = why or true
+            if promptId == idstr then promptId = nil end
+            menuActive[idstr] = nil
+        end
+
+        local function forceEndCallout(idstr)
+            if not idstr then return end
+            pendingAction[idstr] = "end"
+            cleanupLocalCallout(idstr)
+            TriggerServerEvent("callouts:end", idstr)
         end
 
         local function startEndAckFallback(idstr, timeoutMs)
@@ -234,11 +968,11 @@ Citizen.CreateThread(function()
                 TriggerServerEvent("callouts:accept", idstr)
             end
 
+            dismissedCallouts[idstr] = nil
             active[idstr] = active[idstr] or {}
-            active[idstr].accepted = true
-            assignedCalloutsToMe[idstr] = true
+            active[idstr].acceptPending = true
 
-            doNotify({ id = "callout_accept_sent_" .. idstr, title = "Callout", description = "Accept sent for " .. tostring(idstr), type = "inform", duration = 3000 })
+            doNotify({ id = "callout_accept_sent_" .. idstr, title = "Callout", description = "Requesting assignment for " .. tostring(idstr), type = "inform", duration = 3000 })
             if promptId == idstr then promptId = nil end
         end
 
@@ -272,7 +1006,7 @@ Citizen.CreateThread(function()
             doNotify({
                 id = "callout_received_" .. idstr,
                 title = "New Callout",
-                description = (smallInst.title or "Callout") .. " — Press E to Accept, G to Deny, or open /callout_menu " .. idstr,
+                description = (smallInst.title or "Callout") .. " — Press E to accept, G to deny, or use /calls.",
                 type = "inform", position = "top-right", duration = 30000, icon = "bell"
             })
 
@@ -284,9 +1018,9 @@ Citizen.CreateThread(function()
                     if active[idstr].accepted then return end
                 end
                 if active[idstr] and not active[idstr].accepted then
-                    cleanupLocalCallout(idstr)
-                    doNotify({ id = "callout_expired_local_" .. idstr, title = "Callout", description = ("Callout %s expired (no one accepted within 30s)."):format(idstr), type = "warning", duration = 4000 })
-                    log("CLIENT local expiry cleaned up callout id=%s", idstr)
+                    if promptId == idstr then promptId = nil end
+                    doNotify({ id = "callout_prompt_expired_" .. idstr, title = "Callout", description = ("Prompt for callout %s timed out. It remains active in /calls until dispatch clears it."):format(idstr), type = "warning", duration = 5000 })
+                    log("CLIENT prompt timeout for callout id=%s; keeping active until server clears it", idstr)
                 end
             end)
         end)
@@ -307,10 +1041,13 @@ Citizen.CreateThread(function()
                 if promptId == old then promptId = nil end
             end
 
+            dismissedCallouts[idstr] = nil
             active[idstr] = active[idstr] or {}
             active[idstr].data = active[idstr].data or {}
+            active[idstr].data.assignedTo = payload.assignedTo
             if payload.coords then active[idstr].data.coords = payload.coords end
             active[idstr].accepted = true
+            active[idstr].acceptPending = nil
 
             if active[idstr].blip and DoesBlipExist(active[idstr].blip) then
                 SetBlipColour(active[idstr].blip, 3)
@@ -323,11 +1060,16 @@ Citizen.CreateThread(function()
 
             local myServerId = GetPlayerServerId(PlayerId())
             if payload.assignedTo and tostring(payload.assignedTo) == tostring(myServerId) then
+                for otherId, _ in pairs(assignedCalloutsToMe) do
+                    if tostring(otherId) ~= idstr then
+                        assignedCalloutsToMe[otherId] = nil
+                    end
+                end
                 assignedCalloutsToMe[idstr] = true
                 doNotify({
                     id = "callout_assigned_" .. idstr,
                     title = "Callout Assigned",
-                    description = "You were assigned to " .. tostring(payload.title or idstr) .. ". Use /callout_menu " .. idstr .. " or press H to End when near the scene.",
+                    description = "You were assigned to " .. tostring(payload.title or idstr) .. ". Use /call " .. idstr .. " or /calls, and press H to end when near the scene.",
                     type = "inform", position = "top-right", duration = 8000, icon = "user-check"
                 })
                 pcall(function()
@@ -354,8 +1096,13 @@ Citizen.CreateThread(function()
         RegisterNetEvent("callouts:open_menu")
         AddEventHandler("callouts:open_menu", function(calloutId)
             if not calloutId then return end
-            pcall(function() registerCalloutMenusOnce(tostring(calloutId)) end)
-            pcall(function() openCalloutContextMenu(tostring(calloutId)) end)
+            local idstr = tostring(calloutId)
+            active[idstr] = active[idstr] or { data = { id = idstr, title = "Callout " .. idstr } }
+            active[idstr].data = active[idstr].data or {}
+            active[idstr].data.assignedTo = tostring(GetPlayerServerId(PlayerId()))
+            assignedCalloutsToMe[idstr] = true
+            pcall(function() registerCalloutMenusOnce(idstr) end)
+            pcall(function() openCalloutContextMenu(idstr) end)
             log("CLIENT received open_menu id=%s", tostring(calloutId))
         end)
 
@@ -372,8 +1119,8 @@ Citizen.CreateThread(function()
         AddEventHandler("callouts:denied_feedback", function(calloutId)
             if not calloutId then return end
             local idstr = tostring(calloutId)
-            cleanupLocalCallout(idstr)
-            doNotify({ id = "callout_denied_" .. idstr, title = "Callout", description = "You denied callout " .. idstr, type = "inform", duration = 3000 })
+            dismissLocalCallout(idstr, 'denied')
+            doNotify({ id = "callout_denied_" .. idstr, title = "Callout", description = "Dismissed callout " .. idstr .. ". It stays active in /calls until it is taken or cleared.", type = "inform", duration = 3500 })
             log("CLIENT received callouts:denied_feedback id=%s", idstr)
         end)
 
@@ -381,8 +1128,19 @@ Citizen.CreateThread(function()
         AddEventHandler("callouts:action_failed", function(calloutId, reason)
             local idstr = tostring(calloutId or "")
             local act   = pendingAction[idstr]; pendingAction[idstr] = nil
+            if active[idstr] then
+                active[idstr].acceptPending = nil
+                if act == "accept" then
+                    active[idstr].accepted = false
+                end
+            end
+            assignedCalloutsToMe[idstr] = nil
 
-            doNotify({ id = "callout_fail_" .. idstr, title = "Callout Error", description = tostring(reason or "unknown"), type = "error", duration = 5000 })
+            local friendly = tostring(reason or "unknown")
+            if friendly == "ALREADY_ASSIGNED" then friendly = "You already have an assigned callout." end
+            if friendly == "ALREADY_TAKEN" then friendly = "Another unit already took this callout." end
+            if friendly == "NOT_ASSIGNED_TO_YOU" then friendly = "You are not assigned to that callout." end
+            doNotify({ id = "callout_fail_" .. idstr, title = "Callout Error", description = friendly, type = "error", duration = 5000 })
             log("CLIENT action_failed id=%s reason=%s (pendingAction=%s)", idstr, tostring(reason), tostring(act))
 
             if tostring(reason) == "NOT_FOUND" and act == "accept" then
@@ -479,11 +1237,15 @@ Citizen.CreateThread(function()
         AddEventHandler("callouts:status_check", function(pkt)
             if not pkt or not pkt.id then return end
             local idstr = tostring(pkt.id)
+            active[idstr] = active[idstr] or { data = { id = idstr, title = pkt.title or ("Callout " .. idstr) } }
+            active[idstr].data = active[idstr].data or {}
+            active[idstr].data.assignedTo = tostring(GetPlayerServerId(PlayerId()))
+            assignedCalloutsToMe[idstr] = true
             pendingStatusChecks[idstr] = GetGameTimer() + STATUS_CHECK_TIMEOUT
             doNotify({
                 id = "callout_status_" .. idstr,
                 title = "Dispatch Status Check",
-                description = ("Dispatch: Are you on scene for '%s'? Open /callout_menu %s or press E to confirm."):format(pkt.title or idstr, idstr),
+                description = ("Dispatch: Are you on scene for '%s'? Open /call %s or press E to confirm."):format(pkt.title or idstr, idstr),
                 type = "inform", position = "top", duration = STATUS_CHECK_TIMEOUT, icon = "bell"
             })
             log("CLIENT pending status check set for id=%s", idstr)
@@ -523,8 +1285,9 @@ Citizen.CreateThread(function()
             return math.sqrt(dx * dx + dy * dy + dz * dz)
         end
 
+        local isCalloutOwnedByMe
+
         function registerCalloutMenusOnce(idstr)
-            if registeredMenus[idstr] then return true end
             if type(lib) ~= "table" or type(lib.registerContext) ~= "function" then
                 log("ox_lib not available; cannot register context menu for %s", idstr)
                 return false
@@ -537,7 +1300,8 @@ Citizen.CreateThread(function()
             end
 
             local title = ("Callout %s - %s"):format(idstr, entry.data.title or "unknown")
-            local assignedToMe = assignedCalloutsToMe[idstr] == true
+            local assignedToMe = isCalloutOwnedByMe(idstr)
+            local isAccepted = entry.accepted == true or assignedToMe
 
             local ok, err = pcall(function()
                 lib.registerContext({
@@ -546,8 +1310,9 @@ Citizen.CreateThread(function()
                     options = {
                         {
                             title = "Accept Callout",
-                            description = "Take this callout (if it's still active).",
+                            description = assignedToMe and "You already own this callout." or (isAccepted and "This callout is already assigned." or "Take this callout if it is still active."),
                             icon = "check",
+                            disabled = assignedToMe or isAccepted,
                             onSelect = function()
                                 log("CLIENT menu Accept selected for id=%s", idstr)
                                 acceptCallout(idstr)
@@ -556,11 +1321,13 @@ Citizen.CreateThread(function()
                         },
                         {
                             title = "Deny Callout",
-                            description = "Decline this callout.",
+                            description = assignedToMe and "Use End Callout if you are clearing the scene." or "Decline this callout.",
                             icon = "times",
+                            disabled = assignedToMe,
                             onSelect = function()
                                 log("CLIENT menu Deny selected for id=%s", idstr)
                                 TriggerServerEvent("callouts:deny", idstr)
+                                dismissLocalCallout(idstr, 'denied')
                                 lib.hideContext(true)
                             end
                         },
@@ -568,6 +1335,7 @@ Citizen.CreateThread(function()
                             title = "Status Reply",
                             description = "Send a status reply (On Scene / En Route / Need Assistance).",
                             icon = "bell",
+                            disabled = not assignedToMe,
                             menu = "callout_status_" .. idstr,
                             arrow = true
                         },
@@ -575,6 +1343,7 @@ Citizen.CreateThread(function()
                             title = "Request Backup",
                             description = "Request backup at your current position.",
                             icon = "shield",
+                            disabled = not assignedToMe,
                             onSelect = function()
                                 local ped = PlayerPedId()
                                 local coords = GetEntityCoords(ped)
@@ -599,6 +1368,18 @@ Citizen.CreateThread(function()
                                 pendingAction[idstr] = "end"
                                 TriggerServerEvent("callouts:end", idstr)
                                 startEndAckFallback(idstr, 4000)
+                                lib.hideContext(true)
+                            end
+                        },
+                        {
+                            title = "Force End Callout",
+                            description = "Force clear this callout from your menu immediately.",
+                            icon = "triangle-exclamation",
+                            disabled = not assignedToMe and not isAccepted,
+                            onSelect = function()
+                                log("CLIENT menu Force End Callout selected for id=%s", idstr)
+                                forceEndCallout(idstr)
+                                doNotify({ id = "callout_force_end_menu_" .. idstr, title = "Callout", description = "Force-ended callout " .. tostring(idstr), type = "warning", duration = 4000 })
                                 lib.hideContext(true)
                             end
                         },
@@ -669,7 +1450,7 @@ Citizen.CreateThread(function()
                 log("error registering menus for %s: %s", idstr, tostring(err))
                 return false
             end
-            registeredMenus[idstr] = true
+            registeredMenus[idstr] = GetGameTimer()
             return true
         end
 
@@ -696,7 +1477,7 @@ Citizen.CreateThread(function()
             for id, v in pairs(active) do
                 count = count + 1
                 local ttl = ("[%s] %s"):format(tostring(id), (v.data and v.data.title) or "unknown")
-                local desc = v.accepted and "Accepted" or "Unassigned"
+                local desc = dismissedCallouts[tostring(id)] and "Dismissed locally" or (v.accepted and "Accepted" or "Unassigned")
                 table.insert(opts, {
                     title = ttl,
                     description = desc,
@@ -739,9 +1520,45 @@ Citizen.CreateThread(function()
             end
         end
 
+        isCalloutOwnedByMe = function(idstr)
+            if not idstr then return false end
+            if assignedCalloutsToMe[idstr] == true then return true end
+            local myServerId = tostring(GetPlayerServerId(PlayerId()))
+            local entry = active[idstr]
+            return entry and entry.data and tostring(entry.data.assignedTo or '') == myServerId or false
+        end
+
         local function getAssignedCalloutId()
+            for id, entry in pairs(active) do
+                if isCalloutOwnedByMe(tostring(id)) then return tostring(id) end
+            end
             for k, v in pairs(assignedCalloutsToMe) do if v then return k end end
             return nil
+        end
+
+        local function resolveCommandCalloutId(raw)
+            local idarg = raw and tostring(raw) or nil
+            if idarg and idarg ~= "" then return idarg end
+            if promptId then return tostring(promptId) end
+            local assignedId = getAssignedCalloutId()
+            if assignedId then return tostring(assignedId) end
+            for id, entry in pairs(active) do
+                if entry and isCalloutOwnedByMe(tostring(id)) then return tostring(id) end
+            end
+            for id, entry in pairs(active) do
+                if entry and entry.accepted then return tostring(id) end
+            end
+            return nil
+        end
+
+        local function sendCalloutStatusFromCommand(response)
+            local id = getAssignedCalloutId()
+            if not id then
+                doNotify({ id = "callout_status_no_assigned", title = "Callout", description = "You do not have an assigned callout.", type = "warning", duration = 3500 })
+                return
+            end
+            TriggerServerEvent("callouts:status_response", id, { response = response })
+            doNotify({ id = "callout_status_cmd_" .. tostring(id), title = "Callout", description = "Sent status " .. tostring(response) .. " for " .. tostring(id), type = "success", duration = 3000 })
         end
 
         RegisterCommand("callout_menu", function(source, args)
@@ -769,6 +1586,97 @@ Citizen.CreateThread(function()
             end
 
             openCalloutContextMenu(tostring(idarg))
+        end, false)
+
+        RegisterCommand("calls", function(_, args)
+            local idarg = args and args[1] or nil
+            if idarg and (idarg == "list" or idarg == "all") then
+                showActiveListMenu(nil)
+                return
+            end
+            if idarg and active[tostring(idarg)] then
+                openCalloutContextMenu(tostring(idarg))
+                return
+            end
+            local assignedId = getAssignedCalloutId()
+            if assignedId then
+                openCalloutContextMenu(assignedId)
+                return
+            end
+            showActiveListMenu(nil)
+        end, false)
+
+        RegisterCommand("call", function(_, args)
+            local id = resolveCommandCalloutId(args and args[1] or nil)
+            if not id then
+                doNotify({ id = "callout_call_none", title = "Callout", description = "No active callout to open.", type = "warning", duration = 3500 })
+                return
+            end
+            openCalloutContextMenu(tostring(id))
+        end, false)
+
+        RegisterCommand("acceptcall", function(_, args)
+            local id = resolveCommandCalloutId(args and args[1] or nil)
+            if not id then
+                doNotify({ id = "callout_accept_none", title = "Callout", description = "No callout available to accept.", type = "warning", duration = 3500 })
+                return
+            end
+            acceptCallout(tostring(id))
+        end, false)
+
+        RegisterCommand("denycall", function(_, args)
+            local id = resolveCommandCalloutId(args and args[1] or nil)
+            if not id then
+                doNotify({ id = "callout_deny_none", title = "Callout", description = "No callout available to deny.", type = "warning", duration = 3500 })
+                return
+            end
+            TriggerServerEvent("callouts:deny", tostring(id))
+            dismissLocalCallout(tostring(id), 'denied')
+        end, false)
+
+        RegisterCommand("endcall", function(_, args)
+            local id = resolveCommandCalloutId(args and args[1] or nil)
+            if not id then
+                doNotify({ id = "callout_end_none", title = "Callout", description = "No assigned callout to end.", type = "warning", duration = 3500 })
+                return
+            end
+            pendingAction[tostring(id)] = "end"
+            TriggerServerEvent("callouts:end", tostring(id))
+            startEndAckFallback(tostring(id), 4000)
+        end, false)
+
+        RegisterCommand("backupcall", function(_, args)
+            local id = resolveCommandCalloutId(args and args[1] or nil)
+            if not id then
+                doNotify({ id = "callout_backup_none", title = "Callout", description = "No assigned callout to request backup for.", type = "warning", duration = 3500 })
+                return
+            end
+            local coords = GetEntityCoords(PlayerPedId())
+            local x, y, z = table.unpack(coords)
+            local myName = tostring(GetPlayerName(PlayerId()) or ("Player" .. tostring(GetPlayerServerId(PlayerId()))))
+            TriggerServerEvent("callouts:request_backup", tostring(id), {
+                coords = { x = x, y = y, z = z },
+                fromName = myName,
+                message = "Officer " .. myName .. " requests backup at the scene."
+            })
+        end, false)
+
+        RegisterCommand("callstatus", function(_, args)
+            local raw = tostring((args and args[1]) or "")
+            local normalized = raw:gsub("%s+", ""):upper()
+            if normalized == "SCENE" or normalized == "ONSCENE" or normalized == "OS" then
+                sendCalloutStatusFromCommand("ON_SCENE")
+                return
+            end
+            if normalized == "ENROUTE" or normalized == "ER" then
+                sendCalloutStatusFromCommand("EN_ROUTE")
+                return
+            end
+            if normalized == "ASSIST" or normalized == "HELP" or normalized == "BACKUP" then
+                sendCalloutStatusFromCommand("NEED_ASSISTANCE")
+                return
+            end
+            doNotify({ id = "callout_status_usage", title = "Callout", description = "Usage: /callstatus scene, /callstatus enroute, or /callstatus assist.", type = "inform", duration = 4500 })
         end, false)
 
         Citizen.CreateThread(function()
@@ -813,8 +1721,8 @@ Citizen.CreateThread(function()
                             local idstr = tostring(promptId)
                             log("G: denying promptId=%s", idstr)
                             TriggerServerEvent("callouts:deny", idstr)
-                            doNotify({ id = "callout_deny_sent_" .. idstr, title = "Callout", description = "Denied callout " .. idstr, type = "inform", duration = 3000 })
-                            cleanupLocalCallout(idstr) -- fail-safe so blip never sticks
+                            dismissLocalCallout(idstr, 'denied')
+                            doNotify({ id = "callout_deny_sent_" .. idstr, title = "Callout", description = "Dismissed callout " .. idstr .. ". It remains active in /calls.", type = "inform", duration = 3500 })
                             promptId = nil
                         end
                     end
@@ -830,10 +1738,8 @@ Citizen.CreateThread(function()
                             for id, assigned in pairs(assignedCalloutsToMe) do
                                 if assigned then
                                     log("H held: force ending id=%s", id)
-                                    pendingAction[id] = "end"
-                                    cleanupLocalCallout(id) -- remove blip immediately
+                                    forceEndCallout(id)
                                     doNotify({ id = "callout_force_end_" .. id, title = "Callout", description = "Force-ended callout " .. tostring(id), type = "warning", duration = 4000 })
-                                    TriggerServerEvent("callouts:end", id)
                                 end
                             end
                         else
@@ -1150,6 +2056,21 @@ Citizen.CreateThread(function()
         end)
 
         log("callouts client loaded (complete).")
+    end
+
+    local function waitForFrameworkReady(timeoutMs)
+        local untilT = GetGameTimer() + (timeoutMs or 15000)
+        while GetGameTimer() < untilT do
+            if type(GetResourceState) == "function" and GetResourceState("Az-Framework") == "started" then
+                return true
+            end
+            Wait(250)
+        end
+        return false
+    end
+
+    if not waitForFrameworkReady(15000) then
+        print("[Az-FR | Core System] Az-Framework not started yet; continuing to wait for job sync...")
     end
 
     Wait(200) -- allow exports to init (JIP-safe)

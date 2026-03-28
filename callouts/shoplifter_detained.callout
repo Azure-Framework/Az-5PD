@@ -1,6 +1,6 @@
 return {
-  title = "Shoplifter Detained",
-  description = "Store reports a suspected shoplifter being held by staff.",
+  title = "Shoplifter Detained by Staff",
+  description = "Store staff have one suspect detained at the front and a witness is available for statement.",
   server = {
     getCoords = function()
       local base = { x = -47.0, y = -1755.0, z = 29.4 }
@@ -11,21 +11,32 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local clerk = GetHashKey("s_m_m_shop_keep_01")
-        local suspect = GetHashKey("a_m_y_stwhi_01")
-        RequestModel(clerk); RequestModel(suspect)
-        local t0 = GetGameTimer()
-        while (not HasModelLoaded(clerk) or not HasModelLoaded(suspect)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
-
+        local ents = {}
+        local clerk, suspect, witness = GetHashKey("s_m_m_shop_keep_01"), GetHashKey("a_m_y_stwhi_01"), GetHashKey("s_m_m_security_01")
+        if not (load(clerk) and load(suspect) and load(witness)) then return function() end end
         local c = CreatePed(4, clerk, coords.x+0.8, coords.y, coords.z+0.5, 90.0, true, false)
         local s = CreatePed(4, suspect, coords.x-0.8, coords.y, coords.z+0.5, 270.0, true, false)
-        if DoesEntityExist(c) then SetEntityAsMissionEntity(c,true,true) SetBlockingOfNonTemporaryEvents(c,true) TaskStandStill(c, 30000) end
-        if DoesEntityExist(s) then SetEntityAsMissionEntity(s,true,true) SetBlockingOfNonTemporaryEvents(s,true) TaskHandsUp(s, 30000, PlayerPedId(), -1, true) end
-        local out = {}
-        if DoesEntityExist(c) then table.insert(out,c) end
-        if DoesEntityExist(s) then table.insert(out,s) end
-        return out
+        local w = CreatePed(4, witness, coords.x+2.2, coords.y+0.3, coords.z+0.5, 210.0, true, false)
+        for _, e in ipairs({c,s,w}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(c) then TaskStandStill(c, 45000) end
+        if DoesEntityExist(s) then TaskHandsUp(s, 45000, PlayerPedId(), -1, true) end
+        if DoesEntityExist(w) then TaskStandStill(w, 45000) end
+        CreateThread(function()
+          local a,b = false,false
+          local endAt = GetGameTimer()+70000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 25.0 then a = true notify("Clerk: He stuffed electronics in his jacket and tried to walk out. Security stopped him at the door.") end
+            if not b and d < 12.0 then b = true notify("Security: Merchandise is in the suspect's right jacket pocket. Video from aisle three caught the concealment.") end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

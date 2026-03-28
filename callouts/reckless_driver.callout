@@ -1,6 +1,6 @@
 return {
-  title = "Reckless Driver",
-  description = "Multiple callers report a vehicle speeding and swerving.",
+  title = "Reckless Driver - Recent Crash",
+  description = "Vehicle reported speeding and swerving has now come to rest after striking a curb. Driver may still be impaired.",
   server = {
     getCoords = function()
       local base = { x = 225.0, y = -950.0, z = 29.3 }
@@ -11,31 +11,54 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local vehHash = GetHashKey("sultan")
-        local pedHash = GetHashKey("a_m_y_business_01")
-        RequestModel(vehHash); RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while (not HasModelLoaded(vehHash) or not HasModelLoaded(pedHash)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
-
-        local veh = CreateVehicle(vehHash, coords.x, coords.y, coords.z, math.random(0,360)+0.0, true, false)
-        local drv = 0
+        local ents = {}
+        local vh, dh, wh = GetHashKey("sultan"), GetHashKey("a_m_y_business_01"), GetHashKey("a_m_y_eastsa_01")
+        if not (load(vh) and load(dh) and load(wh)) then return function() end end
+        local veh = CreateVehicle(vh, coords.x, coords.y, coords.z, math.random(0,359)+0.0, true, false)
         if DoesEntityExist(veh) then
           SetEntityAsMissionEntity(veh,true,true)
+          SetVehicleEngineHealth(veh, 420.0)
           SetVehicleDoorsLocked(veh, 1)
-          drv = CreatePedInsideVehicle(veh, 4, pedHash, -1, true, false)
+          SetVehicleOnGroundProperly(veh)
+          SetVehicleTyreBurst(veh, 0, true, 1000.0)
+          table.insert(ents, veh)
         end
-
-        if drv ~= 0 and DoesEntityExist(drv) then
-          SetEntityAsMissionEntity(drv,true,true)
-          SetBlockingOfNonTemporaryEvents(drv,true)
-          TaskVehicleDriveWander(drv, veh, 30.0, 786603)
-        end
-
-        local out = {}
-        if DoesEntityExist(veh) then table.insert(out, veh) end
-        if drv ~= 0 and DoesEntityExist(drv) then table.insert(out, drv) end
-        return out
+        local drv = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, dh, -1, true, false) or 0
+        local wit = CreatePed(4, wh, coords.x+4.0, coords.y+2.0, coords.z+0.5, 180.0, true, false)
+        for _, e in ipairs({drv,wit}) do if e ~= 0 and DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if drv ~= 0 and DoesEntityExist(drv) then TaskVehicleTempAction(drv, veh, 27, 4000) end
+        if DoesEntityExist(wit) then TaskStartScenarioInPlace(wit, "WORLD_HUMAN_STAND_MOBILE", 0, true) end
+        CreateThread(function()
+          local shown1, shown2 = false, false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(drv) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not shown1 and d < 35.0 then shown1 = true notify("Witness: The driver was all over the road and hit the curb hard before coming to a stop.") end
+            if not shown2 and d < 14.0 then
+              shown2 = true
+              SetVehicleEngineOn(veh, true, true, false)
+              SetVehicleUndriveable(veh, false)
+              SetVehicleHandbrake(veh, false)
+              StartVehicleHorn(veh, 120, GetHashKey("HELDDOWN"), false)
+              TaskVehicleDriveWander(drv, veh, 16.0, 786468)
+              CreateThread(function()
+                local untilAt = GetGameTimer() + 4500
+                while GetGameTimer() < untilAt and DoesEntityExist(drv) and DoesEntityExist(veh) and GetPedInVehicleSeat(veh, -1) == drv do
+                  TaskVehicleTempAction(drv, veh, math.random(4,5), math.random(300,700))
+                  Wait(math.random(850, 1300))
+                end
+              end)
+              notify("Driver appears disoriented, keeps honking, and starts rolling off erratically instead of stepping out.")
+            end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if e ~= 0 and DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

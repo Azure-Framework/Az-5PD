@@ -1,0 +1,41 @@
+return {
+  title = "Civil Standby - Property Exchange",
+  description = "Caller requests officer presence while retrieving property from an ex-partner. Verbal argument already started.",
+  server = {
+    getCoords = function()
+      local base = { x = -1151.0, y = -1520.0, z = 10.6 }
+      local rx = base.x + math.random(-16,16)
+      local ry = base.y + math.random(-16,16)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
+      return function(coords)
+        local ents = {}
+        local ph, rh = GetHashKey("a_f_y_business_02"), GetHashKey("a_m_m_bevhills_02")
+        if not (load(ph) and load(rh)) then return function() end end
+        local req = CreatePed(4, ph, coords.x, coords.y, coords.z+0.5, 180.0, true, false)
+        local res = CreatePed(4, rh, coords.x+2.0, coords.y-0.4, coords.z+0.5, 0.0, true, false)
+        for _, e in ipairs({req,res}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(req) then TaskStandStill(req, 45000) end
+        if DoesEntityExist(res) then TaskStandStill(res, 45000) end
+        CreateThread(function()
+          local a,b = false,false
+          local endAt = GetGameTimer()+80000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 30.0 then a = true notify("Dispatch Update: Caller only wants to grab clothing and medication. Other party keeps stepping into the doorway and refusing access.") end
+            if not b and d < 12.0 then b = true notify("Caller: I just want my things and to leave. Other party says nothing is leaving the apartment today.") end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
+      end
+    ]]
+  }
+}

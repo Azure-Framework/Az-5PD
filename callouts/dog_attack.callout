@@ -1,44 +1,48 @@
--- callouts/dog_attack.callout (fixed: use TaskCombatPed)
+-- callouts/dog_attack.callout
 return {
   title = "Dog Attacking Person",
-  description = "Caller reports a dog attacking someone.",
+  description = "Caller reports an aggressive dog attacking a nearby civilian.",
   server = {
     coords = { x = 230.0, y = -800.0, z = 29.0 }
   },
   client = {
     script = [[
       return function(coords)
-        local model = GetHashKey("a_c_rottweiler")
-        RequestModel(model)
+        local dogModel = GetHashKey("a_c_rottweiler")
+        local victimModel = GetHashKey("a_m_m_bevhills_02")
+        RequestModel(dogModel)
+        RequestModel(victimModel)
         local t0 = GetGameTimer()
-        while not HasModelLoaded(model) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-        local dog = CreatePed(28, model, coords.x, coords.y, coords.z + 0.2, 0.0, true, false)
+        while (not HasModelLoaded(dogModel) or not HasModelLoaded(victimModel)) and GetGameTimer() - t0 < 3000 do Citizen.Wait(10) end
+        local victim = CreatePed(4, victimModel, coords.x + 1.5, coords.y + 0.8, coords.z + 0.2, 180.0, true, false)
+        local dog = CreatePed(28, dogModel, coords.x - 1.0, coords.y - 0.4, coords.z + 0.2, 0.0, true, false)
+        if DoesEntityExist(victim) then
+          SetEntityAsMissionEntity(victim, true, true)
+          SetBlockingOfNonTemporaryEvents(victim, true)
+          SetPedCanRagdoll(victim, true)
+          SetPedKeepTask(victim, true)
+          TaskSmartFleePed(victim, dog, 60.0, -1, false, false)
+        end
         if DoesEntityExist(dog) then
           SetEntityAsMissionEntity(dog, true, true)
-          SetPedCombatAttributes(dog, 46, true)
           SetPedCombatAttributes(dog, 3, true)
+          SetPedCombatAttributes(dog, 5, true)
+          SetPedCombatAttributes(dog, 46, true)
           SetPedKeepTask(dog, true)
-
-          -- select nearest player/ped target
-          local target = PlayerPedId()
-          -- attempt to find nearest player ped if available
-          local players = GetActivePlayers()
-          if players and #players > 0 then
-            for i=1, #players do
-              local p = GetPlayerPed(players[i])
-              if p and p ~= 0 and p ~= dog then
-                target = p
-                break
-              end
+          SetBlockingOfNonTemporaryEvents(dog, true)
+          SetPedAlertness(dog, 3)
+          if DoesEntityExist(victim) then TaskCombatPed(dog, victim, 0, 16) else TaskCombatPed(dog, PlayerPedId(), 0, 16) end
+        end
+        Citizen.CreateThread(function()
+          local endAt = GetGameTimer() + 45000
+          while GetGameTimer() < endAt and DoesEntityExist(dog) do
+            Citizen.Wait(1000)
+            if DoesEntityExist(victim) and #(GetEntityCoords(PlayerPedId()) - GetEntityCoords(dog)) < 12.0 then
+              if not IsPedDeadOrDying(victim, true) and GetEntityHealth(victim) > 100 then TaskCombatPed(dog, victim, 0, 16) else TaskCombatPed(dog, PlayerPedId(), 0, 16) end
             end
           end
-
-          -- use TaskCombatPed to attack the chosen target
-          TaskCombatPed(dog, target, 0, 16)
-        end
-
-        -- return the dog entity so client can delete it later
-        return { dog }
+        end)
+        return { dog, victim }
       end
     ]]
   }

@@ -1,6 +1,6 @@
 return {
-  title = "Domestic Disturbance",
-  description = "Caller reports yelling and possible physical altercation between two parties.",
+  title = "Domestic Disturbance - Escalating",
+  description = "Neighbors report yelling, items being thrown, and conflicting stories between parties.",
   server = {
     getCoords = function()
       local base = { x = -1065.0, y = -1150.0, z = 2.2 }
@@ -11,29 +11,90 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg)
+        BeginTextCommandThefeedPost("STRING")
+        AddTextComponentSubstringPlayerName(msg)
+        EndTextCommandThefeedPostTicker(false, false)
+      end
+      local function dist(a, b)
+        local dx, dy, dz = a.x-b.x, a.y-b.y, (a.z or 0.0)-(b.z or 0.0)
+        return math.sqrt(dx*dx + dy*dy + dz*dz)
+      end
+      local function loadModel(hash)
+        RequestModel(hash)
+        local timeout = GetGameTimer() + 4000
+        while not HasModelLoaded(hash) and GetGameTimer() < timeout do Wait(10) end
+        return HasModelLoaded(hash)
+      end
       return function(coords)
-        local male  = GetHashKey("a_m_m_business_01")
-        local female= GetHashKey("a_f_y_tourist_01")
-        RequestModel(male); RequestModel(female)
-        local t0 = GetGameTimer()
-        while (not HasModelLoaded(male) or not HasModelLoaded(female)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
+        local entities = {}
+        local male = GetHashKey("a_m_m_business_01")
+        local female = GetHashKey("a_f_y_tourist_01")
+        local witnessHash = GetHashKey("a_f_y_business_02")
+        if not (loadModel(male) and loadModel(female) and loadModel(witnessHash)) then return function() end end
 
-        local p1 = CreatePed(4, male, coords.x+0.5, coords.y, coords.z+0.5, 0.0, true, false)
-        local p2 = CreatePed(4, female, coords.x-0.5, coords.y, coords.z+0.5, 180.0, true, false)
-        if DoesEntityExist(p1) then SetEntityAsMissionEntity(p1,true,true) SetBlockingOfNonTemporaryEvents(p1,true) end
-        if DoesEntityExist(p2) then SetEntityAsMissionEntity(p2,true,true) SetBlockingOfNonTemporaryEvents(p2,true) end
-
-        if DoesEntityExist(p1) and DoesEntityExist(p2) then
-          if math.random() < 0.5 then
-            TaskStandStill(p1, 30000)
-            TaskStandStill(p2, 30000)
-          else
-            SetPedFleeAttributes(p2, 0, false)
-            TaskCombatPed(p1, p2, 0, 16)
-            TaskCombatPed(p2, p1, 0, 16)
+        local suspect = CreatePed(4, male, coords.x + 0.4, coords.y + 0.1, coords.z + 0.5, 140.0, true, false)
+        local victim = CreatePed(4, female, coords.x - 0.8, coords.y + 0.4, coords.z + 0.5, 320.0, true, false)
+        local witness = CreatePed(4, witnessHash, coords.x + 3.2, coords.y + 1.8, coords.z + 0.5, 210.0, true, false)
+        for _, ped in ipairs({suspect, victim, witness}) do
+          if DoesEntityExist(ped) then
+            SetEntityAsMissionEntity(ped, true, true)
+            SetBlockingOfNonTemporaryEvents(ped, true)
+            SetPedKeepTask(ped, true)
+            table.insert(entities, ped)
           end
         end
-        return { p1, p2 }
+
+        local violent = math.random() < 0.35
+        if DoesEntityExist(suspect) and DoesEntityExist(victim) then
+          TaskTurnPedToFaceEntity(suspect, victim, -1)
+          TaskTurnPedToFaceEntity(victim, suspect, -1)
+          if violent then
+            SetPedCanRagdoll(victim, true)
+            TaskCombatPed(suspect, victim, 0, 16)
+            TaskSmartFleePed(victim, suspect, 25.0, -1, false, false)
+          else
+            TaskStandStill(suspect, 45000)
+            TaskStandStill(victim, 45000)
+          end
+        end
+        if DoesEntityExist(witness) then
+          TaskStartScenarioInPlace(witness, "WORLD_HUMAN_STAND_MOBILE", 0, true)
+        end
+
+        CreateThread(function()
+          local shown1, shown2, shown3 = false, false, false
+          local center = vector3(coords.x, coords.y, coords.z)
+          local endAt = GetGameTimer() + 90000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, {x=center.x,y=center.y,z=center.z})
+            if not shown1 and d < 40.0 then
+              shown1 = true
+              notify("Dispatch Update: Neighbor states yelling has been going on for 10 minutes and a phone was thrown.")
+            end
+            if not shown2 and d < 18.0 then
+              shown2 = true
+              notify("Victim: ^2He grabbed my arm and smashed my phone.^7 Suspect: ^1She hit me first.^7")
+            end
+            if not shown3 and d < 12.0 then
+              shown3 = true
+              notify("Witness: I heard glass break inside. There may be children upstairs, but I did not see them.")
+            end
+            if violent and shown2 and DoesEntityExist(suspect) and not IsPedDeadOrDying(suspect, true) then
+              if d < 10.0 then
+                ClearPedTasks(suspect)
+                TaskHandsUp(suspect, 10000, PlayerPedId(), -1, true)
+                violent = false
+              end
+            end
+          end
+        end)
+
+        return function()
+          for _, ent in ipairs(entities) do if DoesEntityExist(ent) then DeleteEntity(ent) end end
+        end
       end
     ]]
   }

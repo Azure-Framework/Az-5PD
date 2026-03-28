@@ -1,0 +1,42 @@
+return {
+  title = "Stolen Vehicle Hit - Occupied",
+  description = "Automatic plate reader hit on a parked stolen vehicle. Occupants are still inside and may be preparing to move.",
+  server = {
+    getCoords = function()
+      local base = { x = 464.0, y = -790.0, z = 27.4 }
+      local rx = base.x + math.random(-18,18)
+      local ry = base.y + math.random(-18,18)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
+      return function(coords)
+        local ents = {}
+        local vh, dh, ph = GetHashKey("fusilade"), GetHashKey("g_m_y_lost_01"), GetHashKey("g_m_y_mexgang_01")
+        if not (load(vh) and load(dh) and load(ph)) then return function() end end
+        local veh = CreateVehicle(vh, coords.x, coords.y, coords.z, math.random(0,359)+0.0, true, false)
+        if DoesEntityExist(veh) then SetEntityAsMissionEntity(veh,true,true) SetVehicleDoorsLocked(veh, 2) SetVehicleEngineOn(veh, true, true, false) SetVehicleDirtLevel(veh, 10.0) table.insert(ents,veh) end
+        local driver = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, dh, -1, true, false) or 0
+        local passenger = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, ph, 0, true, false) or 0
+        for _, e in ipairs({driver,passenger}) do if e ~= 0 and DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        CreateThread(function()
+          local a,b,roll = false,false,false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(driver) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 40.0 then a = true notify("Dispatch Update: Vehicle was entered stolen two hours ago. Last sighting involved two occupants switching parking lots near downtown.") end
+            if not b and d < 16.0 then b = true notify("Occupants appear to be watching mirrors and talking rapidly. Doors remain locked.") end
+            if not roll and d < 10.0 then roll = true if DoesEntityExist(veh) and DoesEntityExist(driver) then TaskVehicleDriveWander(driver, veh, 24.0, 786603) notify("Stolen vehicle starts moving as your unit closes the distance.") end end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if e ~= 0 and DoesEntityExist(e) then DeleteEntity(e) end end end
+      end
+    ]]
+  }
+}

@@ -1,5 +1,32 @@
 Config = Config or {}
 
+
+local function az5pdNormalizeJobName(name)
+  if name == nil then return nil end
+  return string.lower(tostring(name))
+end
+
+local function az5pdGetAllowedJobs()
+  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
+  if type(cfg) == 'table' and next(cfg) ~= nil then
+    return cfg
+  end
+  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+end
+
+local function az5pdJobAllowed(jobName)
+  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
+  local normalized = az5pdNormalizeJobName(jobName)
+  if not normalized then return false end
+  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
+    if az5pdNormalizeJobName(allowed) == normalized then
+      return true
+    end
+  end
+  return false
+end
+
+
 Config.RandomEvents = (Config.RandomEvents == nil) and true or Config.RandomEvents
 
 Config.ChanceRate = Config.ChanceRate or 0.01
@@ -49,9 +76,31 @@ Config.VehicleModels = Config.VehicleModels or {
 Config.RequireJob = Config.RequireJob or false
 Config.AllowedJobs = Config.AllowedJobs or { "BCSO", "LSPD", "SAST", "POLICE", "LEO" }
 
-local function getPlayerJob()
+local cachedPlayerJob = nil
 
-    return "LEO" -- fallback default
+RegisterNetEvent('AzFR:responsePlayerJob', function(job)
+    cachedPlayerJob = tostring(job or '')
+end)
+
+CreateThread(function()
+    while true do
+        TriggerServerEvent('AzFR:requestPlayerJob')
+        Wait(15000)
+    end
+end)
+
+local function getPlayerJob()
+    if cachedPlayerJob and cachedPlayerJob ~= '' then
+        return cachedPlayerJob
+    end
+    if LocalPlayer and LocalPlayer.state and LocalPlayer.state.job then
+        local stateJob = LocalPlayer.state.job
+        if type(stateJob) == 'table' then
+            return tostring(stateJob.name or stateJob.job or '')
+        end
+        return tostring(stateJob or '')
+    end
+    return nil
 end
 
 local ActiveEvents = {}  -- [id] = { ... }

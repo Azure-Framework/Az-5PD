@@ -1,6 +1,6 @@
 return {
-  title = "Vehicle Burglary In Progress",
-  description = "Caller reports a subject breaking into a parked vehicle.",
+  title = "Vehicle Burglary in Progress",
+  description = "Subject is actively checking handles and trying to pry open a parked vehicle while a lookout lingers nearby.",
   server = {
     getCoords = function()
       local base = { x = 216.0, y = -802.0, z = 30.8 }
@@ -11,28 +11,39 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local vehHash = GetHashKey("asea")
-        local pedHash = GetHashKey("a_m_m_hillbilly_01")
-        RequestModel(vehHash); RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while (not HasModelLoaded(vehHash) or not HasModelLoaded(pedHash)) and GetGameTimer()-t0 < 2500 do Citizen.Wait(10) end
-
+        local ents = {}
+        local vehHash, suspectHash, lookoutHash = GetHashKey("asea"), GetHashKey("a_m_m_hillbilly_01"), GetHashKey("a_m_y_stwhi_01")
+        if not (load(vehHash) and load(suspectHash) and load(lookoutHash)) then return function() end end
         local veh = CreateVehicle(vehHash, coords.x+1.5, coords.y, coords.z, 0.0, true, false)
-        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, 0.0, true, false)
-        if DoesEntityExist(veh) then SetEntityAsMissionEntity(veh,true,true) end
-        if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          GiveWeaponToPed(ped, GetHashKey("WEAPON_CROWBAR"), 1, false, true)
-          SetBlockingOfNonTemporaryEvents(ped,true)
-          TaskTurnPedToFaceEntity(ped, veh, 1000)
-          Citizen.Wait(1000)
-          TaskStartScenarioInPlace(ped, "WORLD_HUMAN_WELDING", 0, true)
+        local suspect = CreatePed(4, suspectHash, coords.x, coords.y, coords.z+0.5, 0.0, true, false)
+        local lookout = CreatePed(4, lookoutHash, coords.x+4.5, coords.y+1.2, coords.z+0.5, 170.0, true, false)
+        for _, e in ipairs({veh,suspect,lookout}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) table.insert(ents,e) end end
+        if DoesEntityExist(veh) then SetVehicleDoorsLocked(veh, 2) SetVehicleAlarm(veh, true) end
+        if DoesEntityExist(suspect) then
+          GiveWeaponToPed(suspect, GetHashKey("WEAPON_CROWBAR"), 1, false, true)
+          SetBlockingOfNonTemporaryEvents(suspect,true)
+          TaskTurnPedToFaceEntity(suspect, veh, 1000)
+          Wait(1000)
+          TaskStartScenarioInPlace(suspect, "WORLD_HUMAN_WELDING", 0, true)
         end
-        local out = {}
-        if DoesEntityExist(veh) then table.insert(out,veh) end
-        if DoesEntityExist(ped) then table.insert(out,ped) end
-        return out
+        if DoesEntityExist(lookout) then SetBlockingOfNonTemporaryEvents(lookout,true) TaskStandStill(lookout, 45000) end
+        CreateThread(function()
+          local a,b,react=false,false,false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Neighbor says the suspect popped one door but could not get in. Possible lookout in a gray hoodie nearby.") end
+            if not b and d < 12.0 then b = true notify("You can hear the vehicle alarm chirping and see fresh tool marks on the driver door.") end
+            if not react and d < 10.0 then react = true if DoesEntityExist(lookout) then TaskSmartFleePed(lookout, PlayerPedId(), 60.0, -1, true, true) end if DoesEntityExist(suspect) then ClearPedTasks(suspect) TaskSmartFleePed(suspect, PlayerPedId(), 70.0, -1, true, true) end end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

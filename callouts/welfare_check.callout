@@ -1,6 +1,6 @@
 return {
-  title = "Welfare Check",
-  description = "Caller hasn't seen neighbor in days, possible medical issue.",
+  title = "Welfare Check - Delayed Contact",
+  description = "Neighbor has not seen the resident in several days. Mail is piling up and the subject may be sick or injured.",
   server = {
     getCoords = function()
       local base = { x = -1515.0, y = -575.0, z = 33.0 }
@@ -11,18 +11,38 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function loadAnim(dict) RequestAnimDict(dict) local t=GetGameTimer()+4000 while not HasAnimDictLoaded(dict) and GetGameTimer()<t do Wait(10) end return HasAnimDictLoaded(dict) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local pedHash = GetHashKey("a_m_m_business_01")
-        RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
+        local ents, props = {}, {}
+        local pedHash, witnessHash, mailHash = GetHashKey("a_m_m_business_01"), GetHashKey("a_f_y_bevhills_04"), GetHashKey("prop_cs_envolope_01")
+        if not (load(pedHash) and load(witnessHash) and load(mailHash)) then return function() end end
         local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.3, 0.0, true, false)
+        local witness = CreatePed(4, witnessHash, coords.x+4.0, coords.y+2.0, coords.z+0.3, 180.0, true, false)
+        for _, e in ipairs({ped, witness}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) table.insert(ents,e) end end
         if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          SetBlockingOfNonTemporaryEvents(ped,true)
-          TaskStartScenarioInPlace(ped, "WORLD_HUMAN_BUM_SLUMPED", 0, true)
+          if loadAnim("amb@world_human_bum_slumped@male@laying_on_left_side@base") then
+            TaskPlayAnim(ped, "amb@world_human_bum_slumped@male@laying_on_left_side@base", "base", 2.0, 2.0, -1, 1, 0, false, false, false)
+          else
+            TaskStartScenarioInPlace(ped, "WORLD_HUMAN_BUM_SLUMPED", 0, true)
+          end
         end
-        return { ped }
+        if DoesEntityExist(witness) then TaskStartScenarioInPlace(witness, "WORLD_HUMAN_STAND_MOBILE", 0, true) end
+        for i = 1, 3 do local m = CreateObject(mailHash, coords.x+0.5+(i*0.15), coords.y-0.6, coords.z, true, true, false) if DoesEntityExist(m) then PlaceObjectOnGroundProperly(m) SetEntityAsMissionEntity(m,true,true) table.insert(props,m) end end
+        CreateThread(function()
+          local a,b = false,false
+          local endAt = GetGameTimer()+90000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Neighbor says mail and packages have been sitting outside for two days and the subject missed work.") end
+            if not b and d < 12.0 then b = true notify("Resident is breathing but weak, sweating heavily, and barely responsive. EMS evaluation is recommended.") end
+          end
+        end)
+        return function() for _, o in ipairs(props) do if DoesEntityExist(o) then DeleteEntity(o) end end for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }

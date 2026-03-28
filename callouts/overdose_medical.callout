@@ -1,6 +1,6 @@
 return {
-  title = "Possible Overdose",
-  description = "Unconscious person found. Breathing slow, unknown drugs.",
+  title = "Possible Overdose - EMS Requested",
+  description = "Unconscious subject on the ground, shallow breathing, friend on scene reporting opioid use.",
   server = {
     getCoords = function()
       local base = { x = -536.0, y = -217.0, z = 37.7 }
@@ -11,23 +11,38 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function loadAnim(dict) RequestAnimDict(dict) local t=GetGameTimer()+4000 while not HasAnimDictLoaded(dict) and GetGameTimer()<t do Wait(10) end return HasAnimDictLoaded(dict) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local pedHash = GetHashKey("a_m_m_tramp_01")
-        RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-
-        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.3, math.random(0,360)+0.0, true, false)
-        if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          SetBlockingOfNonTemporaryEvents(ped,true)
-          SetEntityHealth(ped, 120)
-          RequestAnimDict("amb@world_human_bum_slumped@male@laying_on_left_side@base")
-          local t1 = GetGameTimer()
-          while not HasAnimDictLoaded("amb@world_human_bum_slumped@male@laying_on_left_side@base") and GetGameTimer()-t1 < 1500 do Citizen.Wait(10) end
-          TaskPlayAnim(ped, "amb@world_human_bum_slumped@male@laying_on_left_side@base", "base", 2.0, 2.0, -1, 1, 0, false, false, false)
+        local ents, props = {}, {}
+        local victimHash, friendHash, bottleHash = GetHashKey("a_m_m_tramp_01"), GetHashKey("a_f_y_hipster_02"), GetHashKey("prop_cs_pills")
+        if not (load(victimHash) and load(friendHash) and load(bottleHash)) then return function() end end
+        local victim = CreatePed(4, victimHash, coords.x, coords.y, coords.z+0.25, math.random(0,359)+0.0, true, false)
+        local friend = CreatePed(4, friendHash, coords.x+1.1, coords.y+0.6, coords.z+0.25, 210.0, true, false)
+        for _, ped in ipairs({victim, friend}) do if DoesEntityExist(ped) then SetEntityAsMissionEntity(ped,true,true) SetBlockingOfNonTemporaryEvents(ped,true) table.insert(ents,ped) end end
+        if DoesEntityExist(victim) then
+          SetEntityHealth(victim, 115)
+          if loadAnim("amb@world_human_bum_slumped@male@laying_on_left_side@base") then
+            TaskPlayAnim(victim, "amb@world_human_bum_slumped@male@laying_on_left_side@base", "base", 2.0, 2.0, -1, 1, 0, false, false, false)
+          end
         end
-        return { ped }
+        if DoesEntityExist(friend) then TaskStartScenarioInPlace(friend, "CODE_HUMAN_MEDIC_KNEEL", 0, true) end
+        local pills = CreateObject(bottleHash, coords.x+0.25, coords.y-0.4, coords.z, true, true, false)
+        if DoesEntityExist(pills) then PlaceObjectOnGroundProperly(pills) SetEntityAsMissionEntity(pills,true,true) table.insert(props,pills) end
+        CreateThread(function()
+          local shown1, shown2 = false, false
+          local endAt = GetGameTimer()+90000
+          while GetGameTimer() < endAt do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not shown1 and d < 35.0 then shown1 = true notify("Dispatch Update: Friend reports subject used pills about 15 minutes ago and then became unresponsive.") end
+            if not shown2 and d < 12.0 then shown2 = true notify("Friend: His breathing got really slow. He has a weak pulse and blue lips. EMS needs to move.") end
+          end
+        end)
+        return function() for _, obj in ipairs(props) do if DoesEntityExist(obj) then DeleteEntity(obj) end end for _, ent in ipairs(ents) do if DoesEntityExist(ent) then DeleteEntity(ent) end end end
       end
     ]]
   }

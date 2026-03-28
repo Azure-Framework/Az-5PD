@@ -267,7 +267,7 @@
       color: white;
     }
 
-    .status.expired, .status.suspended {
+    .status.expired, .status.expire, .status.suspended, .status.none, .status.revoked {
       background: var(--danger);
       color: white;
     }
@@ -2037,5 +2037,6 @@ sy = e.clientY || (e.touches && e.touches[0] && e.touches[0].clientY);
   });
 })();
 </script>
+<script src="sim_panel.js"></script>
 </body>
 </html>

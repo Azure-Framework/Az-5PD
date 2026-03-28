@@ -1,0 +1,50 @@
+return {
+  title = "Driver Asleep at Wheel",
+  description = "Vehicle has been stopped through multiple light cycles with the driver slumped over in the seat.",
+  server = {
+    getCoords = function()
+      local base = { x = 255.0, y = -377.0, z = 44.0 }
+      local rx = base.x + math.random(-20,20)
+      local ry = base.y + math.random(-20,20)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
+      return function(coords)
+        local ents = {}
+        local vh, dh = GetHashKey("ingot"), GetHashKey("a_m_y_stbla_01")
+        if not (load(vh) and load(dh)) then return function() end end
+        local veh = CreateVehicle(vh, coords.x, coords.y, coords.z, math.random(0,359)+0.0, true, false)
+        if DoesEntityExist(veh) then SetEntityAsMissionEntity(veh,true,true) SetVehicleEngineOn(veh, true, true, false) SetVehicleDoorsLocked(veh, 1) table.insert(ents,veh) end
+        local driver = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, dh, -1, true, false) or 0
+        if driver ~= 0 and DoesEntityExist(driver) then SetEntityAsMissionEntity(driver,true,true) SetBlockingOfNonTemporaryEvents(driver,true) SetPedKeepTask(driver,true) table.insert(ents,driver) TaskVehicleTempAction(driver, veh, 27, 10000) end
+        CreateThread(function()
+          local a,b,awake = false,false,false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(driver) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Caller says the vehicle has not moved through several green lights and horn honks are not getting a response.") end
+            if not b and d < 12.0 then b = true notify("Driver is slumped heavily toward the center console. Vehicle is still in drive with the brake lights on.") end
+            if not awake and d < 8.0 then
+              awake = true
+              ClearPedTasks(driver)
+              SetVehicleEngineOn(veh, true, true, false)
+              SetVehicleUndriveable(veh, false)
+              SetVehicleHandbrake(veh, false)
+              StartVehicleHorn(veh, 120, GetHashKey("HELDDOWN"), false)
+              TaskVehicleDriveWander(driver, veh, 16.0, 786603)
+              notify("Driver wakes up startled, lays on the horn, and begins rolling forward instead of getting out.")
+            end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if e ~= 0 and DoesEntityExist(e) then DeleteEntity(e) end end end
+      end
+    ]]
+  }
+}

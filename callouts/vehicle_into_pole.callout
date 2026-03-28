@@ -1,0 +1,43 @@
+return {
+  title = "Single Vehicle Crash - Into Pole",
+  description = "Caller reports a vehicle struck a pole and airbags deployed. Driver is conscious but seems impaired.",
+  server = {
+    getCoords = function()
+      local base = { x = 830.0, y = -1292.0, z = 26.3 }
+      local rx = base.x + math.random(-18,18)
+      local ry = base.y + math.random(-18,18)
+      return { x = rx, y = ry, z = base.z }
+    end
+  },
+  client = {
+    script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
+      return function(coords)
+        local ents = {}
+        local vh, dh, wh = GetHashKey("stanier"), GetHashKey("a_m_y_roadcyc_01"), GetHashKey("a_m_y_beachvesp_01")
+        if not (load(vh) and load(dh) and load(wh)) then return function() end end
+        local veh = CreateVehicle(vh, coords.x, coords.y, coords.z, math.random(0,359)+0.0, true, false)
+        local witness = CreatePed(4, wh, coords.x+4.5, coords.y+1.0, coords.z+0.5, 90.0, true, false)
+        if DoesEntityExist(veh) then SetEntityAsMissionEntity(veh,true,true) SetVehicleEngineHealth(veh, 180.0) SetVehicleBodyHealth(veh, 420.0) SetVehicleUndriveable(veh,true) table.insert(ents,veh) end
+        local driver = DoesEntityExist(veh) and CreatePedInsideVehicle(veh, 4, dh, -1, true, false) or 0
+        for _, e in ipairs({driver,witness}) do if e ~= 0 and DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(witness) then TaskStartScenarioInPlace(witness, "WORLD_HUMAN_STAND_MOBILE", 0, true) end
+        CreateThread(function()
+          local a,b,stepOut = false,false,false
+          local endAt = GetGameTimer()+85000
+          while GetGameTimer() < endAt and DoesEntityExist(driver) do
+            Wait(500)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not a and d < 35.0 then a = true notify("Dispatch Update: Caller says the vehicle drifted right for no reason and hit a pole at low speed. Airbags deployed.") end
+            if not b and d < 14.0 then b = true notify("Witness: Driver looks dazed and keeps trying to restart the engine even though the front end is crushed.") end
+            if not stepOut and d < 10.0 then stepOut = true TaskLeaveVehicle(driver, veh, 256) Wait(1500) if DoesEntityExist(driver) and not IsPedInAnyVehicle(driver, false) then TaskStandStill(driver, 12000) end end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if e ~= 0 and DoesEntityExist(e) then DeleteEntity(e) end end end
+      end
+    ]]
+  }
+}

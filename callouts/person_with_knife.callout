@@ -1,6 +1,6 @@
 return {
-  title = "Person with a Knife",
-  description = "Caller reports a person brandishing a knife and threatening people.",
+  title = "Armed Subject with Knife",
+  description = "Subject is waving a knife at a victim and refusing to back away.",
   server = {
     getCoords = function()
       local base = { x = 300.0, y = -1000.0, z = 29.3 }
@@ -11,21 +11,41 @@ return {
   },
   client = {
     script = [[
+      local function notify(msg) BeginTextCommandThefeedPost("STRING") AddTextComponentSubstringPlayerName(msg) EndTextCommandThefeedPostTicker(false, false) end
+      local function load(hash) RequestModel(hash) local t=GetGameTimer()+4000 while not HasModelLoaded(hash) and GetGameTimer()<t do Wait(10) end return HasModelLoaded(hash) end
+      local function dist(a,b) local dx,dy,dz=a.x-b.x,a.y-b.y,(a.z or 0.0)-(b.z or 0.0) return math.sqrt(dx*dx+dy*dy+dz*dz) end
       return function(coords)
-        local pedHash = GetHashKey("a_m_y_hipster_01")
-        RequestModel(pedHash)
-        local t0 = GetGameTimer()
-        while not HasModelLoaded(pedHash) and GetGameTimer()-t0 < 2000 do Citizen.Wait(10) end
-
-        local ped = CreatePed(4, pedHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
-        if DoesEntityExist(ped) then
-          SetEntityAsMissionEntity(ped,true,true)
-          GiveWeaponToPed(ped, GetHashKey("WEAPON_KNIFE"), 1, false, true)
-          SetBlockingOfNonTemporaryEvents(ped, true)
-          SetPedKeepTask(ped, true)
-          TaskCombatPed(ped, PlayerPedId(), 0, 16)
+        local ents = {}
+        local suspectHash, victimHash = GetHashKey("a_m_y_hipster_01"), GetHashKey("a_f_y_business_04")
+        if not (load(suspectHash) and load(victimHash)) then return function() end end
+        local suspect = CreatePed(4, suspectHash, coords.x, coords.y, coords.z+0.5, math.random(0,360)+0.0, true, false)
+        local victim  = CreatePed(4, victimHash, coords.x+2.0, coords.y+1.0, coords.z+0.5, 180.0, true, false)
+        for _, e in ipairs({suspect, victim}) do if DoesEntityExist(e) then SetEntityAsMissionEntity(e,true,true) SetBlockingOfNonTemporaryEvents(e,true) SetPedKeepTask(e,true) table.insert(ents,e) end end
+        if DoesEntityExist(suspect) then
+          GiveWeaponToPed(suspect, GetHashKey("WEAPON_KNIFE"), 1, false, true)
+          TaskGuardCurrentPosition(suspect, 3.0, 3.0, true)
         end
-        return { ped }
+        if DoesEntityExist(victim) then TaskSmartFleePed(victim, suspect, 40.0, -1, true, true) end
+        CreateThread(function()
+          local shown1, shown2, engaged = false, false, false
+          local endAt = GetGameTimer()+80000
+          while GetGameTimer() < endAt and DoesEntityExist(suspect) do
+            Wait(400)
+            local p = GetEntityCoords(PlayerPedId())
+            local d = dist({x=p.x,y=p.y,z=p.z}, coords)
+            if not shown1 and d < 30.0 then shown1 = true notify("Dispatch Update: Victim says the suspect is upset over money and has already chased people away once.") end
+            if not shown2 and d < 16.0 then shown2 = true notify("Suspect: Stay back! Don't come any closer! Subject is visibly shaking and gripping the knife tightly.") end
+            if not engaged and d < 10.0 then
+              engaged = true
+              if math.random() < 0.5 then
+                TaskCombatPed(suspect, PlayerPedId(), 0, 16)
+              else
+                TaskSmartFleePed(suspect, PlayerPedId(), 70.0, -1, true, true)
+              end
+            end
+          end
+        end)
+        return function() for _, e in ipairs(ents) do if DoesEntityExist(e) then DeleteEntity(e) end end end
       end
     ]]
   }
