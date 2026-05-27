@@ -237,15 +237,36 @@ local function simJobAllowedClient(job)
   return false
 end
 
+local function canUseSimToolsClient()
+  return simJobAllowedClient(simPlayerJobName())
+end
+
+local function closeDeniedSimSurfaces()
+  SimClient.state.pendingMenu = nil
+  SimClient.state.pendingStateToken = nil
+  SimClient.state.syncMessage = nil
+  if closeSimUi then closeSimUi() end
+  TriggerEvent('az_mdt:client:simState', {
+    section = 'overview',
+    denied = true,
+    syncMessage = nil,
+  })
+end
+
 local lastSimDeniedToastAt = 0
 local function simDeniedToast(message)
   local now = GetGameTimer()
   if now - lastSimDeniedToastAt < 1250 then return end
   lastSimDeniedToastAt = now
-  simDeniedToast(message or 'Access denied.')
+  simNotify('Az-5PD', message or 'Access denied.', 'error')
 end
 
 requestStateAndOpen = function(menu)
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   local targetSection = menuToSection and menuToSection(menu) or (menu or 'overview')
   SimClient.state.pendingMenu = menu or 'overview'
   SimClient.state.section = targetSection
@@ -1211,8 +1232,7 @@ RegisterNetEvent('az5pd:sim:incidentClosed', function(incident)
 end)
 
 RegisterNetEvent('az5pd:sim:denied', function(message)
-  SimClient.state.pendingStateToken = nil
-  SimClient.state.syncMessage = nil
+  closeDeniedSimSurfaces()
   refreshSimUi()
   refreshSimHud()
   syncMdtBridge()
@@ -1249,7 +1269,8 @@ RegisterNetEvent('az5pd:sim:panicBroadcast', function(data)
 end)
 
 RegisterNetEvent('az5pd:sim:openMenu', function()
-  if not simJobAllowedClient(simPlayerJobName()) then
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
     simDeniedToast('You are not authorized to use simulation tools.')
     return
   end
@@ -1257,7 +1278,8 @@ RegisterNetEvent('az5pd:sim:openMenu', function()
 end)
 
 RegisterCommand(tostring((Config.Sim and Config.Sim.menuCommand) or 'az5pdsim'), function()
-  if not simJobAllowedClient(simPlayerJobName()) then
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
     simDeniedToast('You are not authorized to use simulation tools.')
     return
   end
@@ -1282,6 +1304,12 @@ RegisterNUICallback('simClose', function(_, cb)
 end)
 
 RegisterNUICallback('simHudEditor', function(data, cb)
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
+    simDeniedToast('You are not authorized to use simulation tools.')
+    cb({ ok = false })
+    return
+  end
   requestStateAndOpen('overview')
   simNotify('Az-5PD', 'The separate HUD has been removed. Use the integrated Simulation / Scene Tools panel instead.', 'inform')
   cb({ ok = true })
@@ -1556,20 +1584,40 @@ RegisterNUICallback('simAction', function(data, cb)
 end)
 
 RegisterNetEvent('az5pd:sim:mdtAction', function(data)
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   handleSimAction(data)
 end)
 
 RegisterCommand('az5pdhud', function()
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   requestStateAndOpen('overview')
   simNotify('Az-5PD', 'The separate HUD has been removed. Use the integrated Simulation / Scene Tools panel instead.', 'inform')
 end, false)
 
 RegisterCommand('az5pdhudreset', function()
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   requestStateAndOpen('overview')
   simNotify('Az-5PD', 'The separate HUD has been removed. Your scene tools now live inside the main Simulation panel.', 'inform')
 end, false)
 
 RegisterCommand('az5pdhudtoggle', function()
+  if not canUseSimToolsClient() then
+    closeDeniedSimSurfaces()
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   requestStateAndOpen('overview')
   simNotify('Az-5PD', 'The separate HUD has been removed. Use the integrated Simulation / Scene Tools panel instead.', 'inform')
 end, false)
