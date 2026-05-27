@@ -1,4 +1,4 @@
--- callouts/dog_attack.callout
+
 return {
   title = "Dog Attacking Person",
   description = "Caller reports an aggressive dog attacking a nearby civilian.",

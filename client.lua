@@ -12,6 +12,10 @@ local function az5pdGetAllowedJobs()
   return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
 end
 
+local function az5pdStandaloneEnabled()
+  return Config and Config.Standalone == true
+end
+
 function DrawText3D(x, y, z, text)
     local onScreen, _x, _y = World3dToScreen2d(x, y, z)
     if not onScreen then return end
@@ -46,13 +50,13 @@ pendingStatusChecks      = pendingStatusChecks      or {}
 menuActive               = menuActive               or {}
 registeredMenus          = registeredMenus          or {}
 acceptingLock            = acceptingLock            or {}
-pendingAction            = pendingAction            or {}  -- track in-flight actions
+pendingAction            = pendingAction            or {}  
 dismissedCallouts       = dismissedCallouts       or {}
 
-local END_DISTANCE_THRESHOLD = 75.0         -- must be near to end (short H)
-local STATUS_CHECK_TIMEOUT   = 30000        -- ms for status check popup
-local ACCEPT_LOCK_MS         = 5000         -- ms to avoid double-accept spam
-local FORCE_HOLD_MS          = 5000         -- hold H for 5s to force-end locally
+local END_DISTANCE_THRESHOLD = 75.0         
+local STATUS_CHECK_TIMEOUT   = 30000        
+local ACCEPT_LOCK_MS         = 5000         
+local FORCE_HOLD_MS          = 5000         
 local hHoldStart             = nil
 
 local registerCalloutMenusOnce, openCalloutContextMenu, showActiveListMenu
@@ -162,7 +166,7 @@ local function setExtraEnabled(veh, extraId, enabled)
         return
     end
 
-    -- native uses "disable", so invert enabled -> disable
+    
     SetVehicleExtra(veh, extraId, not enabled)
 end
 
@@ -736,14 +740,202 @@ end
 
 local function getPlayerJobFromServer(cb)
     assert(type(cb) == "function", "getPlayerJobFromServer requires callback")
+
+    local state = LocalPlayer and LocalPlayer.state or nil
+    local instantJob = nil
+    if state then
+      instantJob = state.department or state.job or nil
+    end
+    if instantJob and tostring(instantJob) ~= '' then
+      cb(az5pdNormalizeJobName(instantJob))
+      return
+    end
+
     local evtName = "AzFR:responsePlayerJob"
     RegisterNetEvent(evtName)
     local handlerId
+    local done = false
     handlerId = AddEventHandler(evtName, function(job)
-        RemoveEventHandler(handlerId)
-        cb(job)
+        if done then return end
+        done = true
+        if handlerId then RemoveEventHandler(handlerId) end
+        cb(az5pdNormalizeJobName(job))
     end)
+
     TriggerServerEvent("AzFR:requestPlayerJob")
+    CreateThread(function()
+      Wait(1500)
+      if done then return end
+      local fallbackState = LocalPlayer and LocalPlayer.state or nil
+      local fallbackJob = fallbackState and (fallbackState.department or fallbackState.job) or nil
+      if fallbackJob and tostring(fallbackJob) ~= '' then
+        done = true
+        if handlerId then RemoveEventHandler(handlerId) end
+        cb(az5pdNormalizeJobName(fallbackJob))
+      end
+    end)
+end
+
+local az5pdAuthState = false
+local az5pdTargetState = false
+local function az5pdCurrentClientJob()
+  local state = LocalPlayer and LocalPlayer.state or nil
+  if state then
+    local v = state.department or state.job or nil
+    if v and tostring(v) ~= '' then return az5pdNormalizeJobName(v) end
+  end
+  return nil
+end
+
+local function az5pdHasUiAccess()
+  local state = LocalPlayer and LocalPlayer.state or nil
+  if state and state.az5pd_hasAccess ~= nil then
+    return state.az5pd_hasAccess == true
+  end
+  return az5pdJobAllowed(az5pdCurrentClientJob())
+end
+local function az5pdSetAuthorized(state)
+  az5pdAuthState = state == true
+end
+
+local function az5pdIsOnDutyState()
+  local state = LocalPlayer and LocalPlayer.state or nil
+  if state and state.az5pd_onDuty ~= nil then
+    return state.az5pd_onDuty == true
+  end
+  return false
+end
+
+local function az5pdMDTAvailable()
+  local names = ((Config and Config.MDT and Config.MDT.externalResourceNames) or (Config and Config.Callouts and Config.Callouts.mdtResourceFallbacks) or { 'Az-MDT', 'az_mdt', 'Az-Mdt-Standalone' })
+  for _, name in ipairs(names) do
+    if name and name ~= '' then
+      local state = GetResourceState(name)
+      if state == 'started' or state == 'starting' then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function az5pdDutyNotify(kind, text)
+  if type(lib) == 'table' and type(lib.notify) == 'function' then
+    lib.notify({ title = 'Police', description = text, type = kind or 'inform', position = 'top-right' })
+  else
+    TriggerEvent('chat:addMessage', { args = { 'Police', text } })
+  end
+end
+
+local function az5pdPrettyDeptLabel(name)
+  local s = tostring(name or ''):gsub('_', ' ')
+  return (s:gsub("(%a)([%w_']*)", function(a, b) return string.upper(a) .. string.lower(b) end))
+end
+
+local function az5pdOpenDutyDialog()
+  local currentJob = az5pdCurrentClientJob()
+  if not az5pdJobAllowed(currentJob) then
+    az5pdDutyNotify('error', 'You are not allowed to use Police duty.')
+    return
+  end
+  if az5pdMDTAvailable() then
+    az5pdDutyNotify('inform', 'Use Az-MDT to go on/off duty for Police.')
+    return
+  end
+  if az5pdIsOnDutyState() then
+    TriggerServerEvent('az5pd:setDutyState', false)
+    return
+  end
+  local options, seen = {}, {}
+  for _, jobName in ipairs((Config.AllowedJobs or az5pdGetAllowedJobs())) do
+    local key = tostring(jobName):lower()
+    if key ~= '' and not seen[key] then
+      seen[key] = true
+      options[#options + 1] = { value = key, label = az5pdPrettyDeptLabel(key) }
+    end
+  end
+  if type(lib) ~= 'table' or type(lib.inputDialog) ~= 'function' or #options <= 1 then
+    TriggerServerEvent('az5pd:setDutyState', true, currentJob or 'police')
+    return
+  end
+  local input = lib.inputDialog('Select On-Duty Department', {{ type = 'select', label = 'Department', options = options, required = true }}, { allowCancel = true })
+  if not input then return end
+  TriggerServerEvent('az5pd:setDutyState', true, input[1])
+end
+
+RegisterNetEvent('az5pd:dutyNotify', function(kind, text)
+  az5pdDutyNotify(kind == 'error' and 'error' or 'inform', text)
+end)
+
+local az5pdHudState = {
+  focus = 'Stand by for dispatch',
+  distance = '—',
+  callCount = 0,
+  actions = 'B MDT • F6 Police Menu • /policeduty'
+}
+
+local function az5pdPushStatusHud()
+  local currentJob = az5pdCurrentClientJob() or 'police'
+  local onDuty = az5pdIsOnDutyState()
+  local show = az5pdHasUiAccess()
+  if not show then
+    SendNUIMessage({ action = 'status_hide' })
+    return
+  end
+
+  local focus = az5pdHudState.focus
+  if onDuty then
+    focus = az5pdPrettyDeptLabel(LocalPlayer.state.az5pd_department or currentJob) .. ' • Await dispatch'
+  elseif az5pdMDTAvailable() then
+    focus = 'Open MDT and go on duty'
+  else
+    focus = 'Use /policeduty to go on duty'
+  end
+
+  local actions = az5pdHudState.actions
+  if az5pdMDTAvailable() then
+    actions = 'B MDT • F6 Police Menu • MDT Duty'
+  end
+
+  SendNUIMessage({
+    action = 'status_update',
+    show = true,
+    duty = onDuty,
+    callCount = tonumber(az5pdHudState.callCount or 0) or 0,
+    focus = focus,
+    distance = az5pdHudState.distance or '—',
+    actions = actions
+  })
+end
+
+RegisterNetEvent('az5pd:dutyStateUpdated', function(onDuty, department)
+  if onDuty then
+    az5pdDutyNotify('success', 'You are now on duty as ' .. az5pdPrettyDeptLabel(department or 'police') .. '.')
+  else
+    az5pdDutyNotify('inform', 'You are now off duty.')
+  end
+  az5pdPushStatusHud()
+end)
+
+CreateThread(function()
+  while true do
+    Wait(1500)
+    az5pdPushStatusHud()
+  end
+end)
+
+RegisterCommand('policeduty', function()
+  az5pdOpenDutyDialog()
+end, false)
+
+local function az5pdIsAuthorizedNow()
+  local j = az5pdCurrentClientJob()
+  if j ~= nil then
+    az5pdAuthState = az5pdJobAllowed(j) and az5pdIsOnDutyState()
+  else
+    az5pdAuthState = az5pdIsOnDutyState()
+  end
+  return az5pdAuthState == true
 end
 
 Citizen.CreateThread(function()
@@ -761,6 +953,20 @@ Citizen.CreateThread(function()
             else
                 print("[callouts-client] (log format error)")
             end
+        end
+
+
+        local function shouldUseMDTCalloutNotifications()
+            local names = { 'Az-MDT', 'az_mdt', 'Az-Mdt-Standalone' }
+            for _, name in ipairs(names) do
+                if name and name ~= '' then
+                    local state = GetResourceState(name)
+                    if state == 'started' or state == 'starting' then
+                        return true
+                    end
+                end
+            end
+            return false
         end
 
         local function doNotify(args)
@@ -806,6 +1012,12 @@ Citizen.CreateThread(function()
             AddTextComponentString(title or "Callout")
             EndTextCommandSetBlipName(b)
             return b
+        end
+
+        local function moveBlipToCoords(blip, coords)
+            if blip and DoesBlipExist(blip) and coords and coords.x then
+                SetBlipCoords(blip, coords.x + 0.0, coords.y + 0.0, coords.z or 0.0)
+            end
         end
 
         local function removeBlip(b)
@@ -862,6 +1074,7 @@ Citizen.CreateThread(function()
                     end
                 end
                 if e.blip then removeBlip(e.blip) end
+                e.sceneSpawned = nil
                 active[idstr] = nil
             end
             assignedCalloutsToMe[idstr] = nil
@@ -891,7 +1104,7 @@ Citizen.CreateThread(function()
             if not idstr then return end
             pendingAction[idstr] = "end"
             cleanupLocalCallout(idstr)
-            TriggerServerEvent("callouts:end", idstr)
+            TriggerServerEvent("az5pd:callouts:end", idstr)
         end
 
         local function startEndAckFallback(idstr, timeoutMs)
@@ -962,10 +1175,10 @@ Citizen.CreateThread(function()
             if e and e.data and e.data._localGenerated then
                 e.data._originLocalId = idstr
                 log("acceptCallout: sending accept_local for local-generated id=%s", idstr)
-                TriggerServerEvent("callouts:accept_local", e.data)
+                TriggerServerEvent("az5pd:callouts:accept_local", e.data)
             else
                 log("acceptCallout: sending accept for id=%s", idstr)
-                TriggerServerEvent("callouts:accept", idstr)
+                TriggerServerEvent("az5pd:callouts:accept", idstr)
             end
 
             dismissedCallouts[idstr] = nil
@@ -976,22 +1189,22 @@ Citizen.CreateThread(function()
             if promptId == idstr then promptId = nil end
         end
 
-        RegisterNetEvent("callouts:request_position")
-        AddEventHandler("callouts:request_position", function(payload)
+        RegisterNetEvent("az5pd:callouts:request_position")
+        AddEventHandler("az5pd:callouts:request_position", function(payload)
             local requestId = payload and payload.requestId
             if not requestId then return end
             local ped = PlayerPedId()
             local coords = GetEntityCoords(ped)
             local x, y, z = table.unpack(coords)
-            TriggerServerEvent("callouts:position_report", requestId, {x = x, y = y, z = z})
+            TriggerServerEvent("az5pd:callouts:position_report", requestId, {x = x, y = y, z = z})
             log("CLIENT sent position report request=%s coords=%.1f,%.1f,%.1f", tostring(requestId), x, y, z)
         end)
 
-        RegisterNetEvent("callouts:new")
-        AddEventHandler("callouts:new", function(smallInst)
+        RegisterNetEvent("az5pd:callouts:new")
+        AddEventHandler("az5pd:callouts:new", function(smallInst)
             if not smallInst or not smallInst.id then return end
             local idstr = tostring(smallInst.id)
-            log("CLIENT callouts:new id=%s title=%s template=%s", idstr, tostring(smallInst.title), tostring(smallInst.template))
+            log("CLIENT az5pd:callouts:new id=%s title=%s template=%s", idstr, tostring(smallInst.title), tostring(smallInst.template))
 
             active[idstr] = active[idstr] or {}
             active[idstr].data = smallInst
@@ -1003,12 +1216,14 @@ Citizen.CreateThread(function()
             end
             promptId = idstr
 
-            doNotify({
-                id = "callout_received_" .. idstr,
-                title = "New Callout",
-                description = (smallInst.title or "Callout") .. " — Press E to accept, G to deny, or use /calls.",
-                type = "inform", position = "top-right", duration = 30000, icon = "bell"
-            })
+            if not shouldUseMDTCalloutNotifications() then
+                doNotify({
+                    id = "callout_received_" .. idstr,
+                    title = "New Callout",
+                    description = (smallInst.title or "Callout") .. " — Press E to accept, G to deny, or use /calls.",
+                    type = "inform", position = "top-right", duration = 30000, icon = "bell"
+                })
+            end
 
             Citizen.CreateThread(function()
                 local start = GetGameTimer()
@@ -1025,8 +1240,8 @@ Citizen.CreateThread(function()
             end)
         end)
 
-        RegisterNetEvent("callouts:accepted")
-        AddEventHandler("callouts:accepted", function(payload)
+        RegisterNetEvent("az5pd:callouts:accepted")
+        AddEventHandler("az5pd:callouts:accepted", function(payload)
             if not payload or not payload.id then return end
             local idstr = tostring(payload.id)
 
@@ -1045,6 +1260,10 @@ Citizen.CreateThread(function()
             active[idstr] = active[idstr] or {}
             active[idstr].data = active[idstr].data or {}
             active[idstr].data.assignedTo = payload.assignedTo
+            active[idstr].data.responders = payload.responders or active[idstr].data.responders or {}
+            active[idstr].data.myAttached = payload.myAttached == true
+            if payload.title then active[idstr].data.title = payload.title end
+            if payload.template then active[idstr].data.template = payload.template end
             if payload.coords then active[idstr].data.coords = payload.coords end
             active[idstr].accepted = true
             active[idstr].acceptPending = nil
@@ -1059,7 +1278,16 @@ Citizen.CreateThread(function()
             end
 
             local myServerId = GetPlayerServerId(PlayerId())
-            if payload.assignedTo and tostring(payload.assignedTo) == tostring(myServerId) then
+            local amAttached = payload.myAttached == true
+            if not amAttached and type(payload.responders) == 'table' then
+                for _, responder in ipairs(payload.responders) do
+                    if responder and tostring(responder.id) == tostring(myServerId) then
+                        amAttached = true
+                        break
+                    end
+                end
+            end
+            if amAttached then
                 for otherId, _ in pairs(assignedCalloutsToMe) do
                     if tostring(otherId) ~= idstr then
                         assignedCalloutsToMe[otherId] = nil
@@ -1068,8 +1296,8 @@ Citizen.CreateThread(function()
                 assignedCalloutsToMe[idstr] = true
                 doNotify({
                     id = "callout_assigned_" .. idstr,
-                    title = "Callout Assigned",
-                    description = "You were assigned to " .. tostring(payload.title or idstr) .. ". Use /call " .. idstr .. " or /calls, and press H to end when near the scene.",
+                    title = payload.joinedBy and tostring(payload.joinedBy) == tostring(myServerId) and "Callout Joined" or "Callout Assigned",
+                    description = (payload.joinedBy and tostring(payload.joinedBy) == tostring(myServerId)) and ("You joined " .. tostring(payload.title or idstr) .. " as an attached unit. Use /call " .. idstr .. " or /calls, and press H to end when near the scene.") or ("You were assigned to " .. tostring(payload.title or idstr) .. ". Use /call " .. idstr .. " or /calls, and press H to end when near the scene."),
                     type = "inform", position = "top-right", duration = 8000, icon = "user-check"
                 })
                 pcall(function()
@@ -1090,42 +1318,43 @@ Citizen.CreateThread(function()
 
             if promptId == idstr then promptId = nil end
             pendingAction[idstr] = nil
-            log("CLIENT received callouts:accepted id=%s assignedTo=%s title=%s", idstr, tostring(payload.assignedTo), tostring(payload.title))
+            log("CLIENT received az5pd:callouts:accepted id=%s assignedTo=%s title=%s", idstr, tostring(payload.assignedTo), tostring(payload.title))
         end)
 
-        RegisterNetEvent("callouts:open_menu")
-        AddEventHandler("callouts:open_menu", function(calloutId)
+        RegisterNetEvent("az5pd:callouts:open_menu")
+        AddEventHandler("az5pd:callouts:open_menu", function(calloutId)
             if not calloutId then return end
             local idstr = tostring(calloutId)
             active[idstr] = active[idstr] or { data = { id = idstr, title = "Callout " .. idstr } }
             active[idstr].data = active[idstr].data or {}
-            active[idstr].data.assignedTo = tostring(GetPlayerServerId(PlayerId()))
+            active[idstr].data.id = idstr
+            active[idstr].data.myAttached = true
             assignedCalloutsToMe[idstr] = true
             pcall(function() registerCalloutMenusOnce(idstr) end)
             pcall(function() openCalloutContextMenu(idstr) end)
             log("CLIENT received open_menu id=%s", tostring(calloutId))
         end)
 
-        RegisterNetEvent("callouts:cancelled")
-        AddEventHandler("callouts:cancelled", function(payload)
+        RegisterNetEvent("az5pd:callouts:cancelled")
+        AddEventHandler("az5pd:callouts:cancelled", function(payload)
             if not payload or not payload.id then return end
             local idstr = tostring(payload.id)
             cleanupLocalCallout(idstr)
             doNotify({ id = "callout_cancel_" .. idstr, title = "Callout Cancelled", description = payload.title or idstr, type = "warning", position = "top-right", duration = 5000 })
-            log("CLIENT received callouts:cancelled id=%s", idstr)
+            log("CLIENT received az5pd:callouts:cancelled id=%s", idstr)
         end)
 
-        RegisterNetEvent("callouts:denied_feedback")
-        AddEventHandler("callouts:denied_feedback", function(calloutId)
+        RegisterNetEvent("az5pd:callouts:denied_feedback")
+        AddEventHandler("az5pd:callouts:denied_feedback", function(calloutId)
             if not calloutId then return end
             local idstr = tostring(calloutId)
             dismissLocalCallout(idstr, 'denied')
             doNotify({ id = "callout_denied_" .. idstr, title = "Callout", description = "Dismissed callout " .. idstr .. ". It stays active in /calls until it is taken or cleared.", type = "inform", duration = 3500 })
-            log("CLIENT received callouts:denied_feedback id=%s", idstr)
+            log("CLIENT received az5pd:callouts:denied_feedback id=%s", idstr)
         end)
 
-        RegisterNetEvent("callouts:action_failed")
-        AddEventHandler("callouts:action_failed", function(calloutId, reason)
+        RegisterNetEvent("az5pd:callouts:action_failed")
+        AddEventHandler("az5pd:callouts:action_failed", function(calloutId, reason)
             local idstr = tostring(calloutId or "")
             local act   = pendingAction[idstr]; pendingAction[idstr] = nil
             if active[idstr] then
@@ -1153,7 +1382,7 @@ Citizen.CreateThread(function()
                         _originLocalId = idstr
                     }
                     log("CLIENT fallback: accept_local for id=%s (template=%s)", idstr, tostring(smallInst.template))
-                    TriggerServerEvent("callouts:accept_local", smallInst)
+                    TriggerServerEvent("az5pd:callouts:accept_local", smallInst)
                 end
 
             elseif tostring(reason) == "NOT_FOUND" and act == "end" then
@@ -1164,13 +1393,202 @@ Citizen.CreateThread(function()
             end
         end)
 
-        RegisterNetEvent("callouts:spawn_entities")
-        AddEventHandler("callouts:spawn_entities", function(spawnPacket)
+
+        local function calloutFindGroundZ(x, y, zHint)
+            local startZ = (tonumber(zHint) or 30.0) + 25.0
+            RequestCollisionAtCoord(x + 0.0, y + 0.0, startZ)
+            local found, gz = GetGroundZFor_3dCoord(x + 0.0, y + 0.0, startZ, false)
+            if found then return gz end
+            for i = 1, 5 do
+                Wait(0)
+                RequestCollisionAtCoord(x + 0.0, y + 0.0, startZ + i)
+                found, gz = GetGroundZFor_3dCoord(x + 0.0, y + 0.0, startZ + i, false)
+                if found then return gz end
+            end
+            return tonumber(zHint) or 30.0
+        end
+
+        local function calloutTemplatePrefersRoad(templateName)
+            local name = tostring(templateName or ''):lower()
+            return name:find('traffic', 1, true) ~= nil
+                or name:find('vehicle', 1, true) ~= nil
+                or name:find('driver', 1, true) ~= nil
+                or name:find('collision', 1, true) ~= nil
+                or name:find('hazard', 1, true) ~= nil
+                or name:find('stolen', 1, true) ~= nil
+                or name:find('reckless', 1, true) ~= nil
+                or name:find('dui', 1, true) ~= nil
+                or name:find('drunk', 1, true) ~= nil
+                or name:find('pursuit', 1, true) ~= nil
+                or name:find('asleep', 1, true) ~= nil
+        end
+
+        local function calloutGetClosestVehicleNodePosHeading(x, y, z)
+            local r1, r2, r3, r4 = GetClosestVehicleNodeWithHeading(x + 0.0, y + 0.0, z + 0.0, 1, 3.0, 0)
+            if type(r1) == 'boolean' then
+                if not r1 then return nil, nil end
+                if type(r2) == 'vector3' or type(r2) == 'table' then
+                    return { x = (r2.x or x) + 0.0, y = (r2.y or y) + 0.0, z = (r2.z or z) + 0.0 }, tonumber(r3) or 0.0
+                end
+                return { x = tonumber(r2) or x, y = tonumber(r3) or y, z = tonumber(r4) or z }, 0.0
+            end
+            if type(r1) == 'vector3' or type(r1) == 'table' then
+                return { x = (r1.x or x) + 0.0, y = (r1.y or y) + 0.0, z = (r1.z or z) + 0.0 }, tonumber(r2) or 0.0
+            end
+            return { x = tonumber(r1) or x, y = tonumber(r2) or y, z = tonumber(r3) or z }, tonumber(r4) or 0.0
+        end
+
+        local function calloutPickSidewalkishSpot(nodePos, heading, original)
+            if not nodePos then return nil end
+            local best, bestScore = nil, nil
+            for _, side in ipairs({ 1.0, -1.0 }) do
+                local ang = math.rad((tonumber(heading) or 0.0) + (90.0 * side))
+                for _, dist in ipairs({ 3.0, 4.5, 6.0 }) do
+                    local sx = nodePos.x + (math.cos(ang) * dist)
+                    local sy = nodePos.y + (math.sin(ang) * dist)
+                    local sz = calloutFindGroundZ(sx, sy, nodePos.z)
+                    local dz = math.abs((sz or nodePos.z) - (nodePos.z or 0.0))
+                    local dx, dy = sx - (original.x or sx), sy - (original.y or sy)
+                    local score = (dz * 10.0) + math.sqrt((dx * dx) + (dy * dy))
+                    if bestScore == nil or score < bestScore then
+                        bestScore = score
+                        best = { x = sx, y = sy, z = sz }
+                    end
+                end
+            end
+            return best
+        end
+
+        local function calloutFindLowerNearbyGround(x, y, z, radii)
+            local current = calloutFindGroundZ(x, y, z)
+            local best = { x = x, y = y, z = current }
+            local scanRadii = radii or { 3.0, 6.0, 9.0, 12.0, 16.0, 22.0, 28.0, 36.0 }
+            for _, radius in ipairs(scanRadii) do
+                for ang = 0, 330, 30 do
+                    local rad = math.rad(ang)
+                    local sx = x + math.cos(rad) * radius
+                    local sy = y + math.sin(rad) * radius
+                    local sz = calloutFindGroundZ(sx, sy, z)
+                    if sz and (not best or sz < (best.z or sz)) then
+                        best = { x = sx, y = sy, z = sz }
+                    end
+                end
+            end
+            return best
+        end
+
+        local function calloutFindRoofEscapeSpot(x, y, z)
+            local lower = calloutFindLowerNearbyGround(x, y, z, { 4.0, 8.0, 12.0, 18.0, 24.0, 32.0, 40.0 })
+            if lower and ((z or 0.0) - (lower.z or z)) >= 1.85 then
+                return lower
+            end
+            return nil
+        end
+
+        local function sanitizeCalloutCoords(templateName, coords)
+            if type(coords) ~= 'table' or not coords.x then return coords end
+            local original = { x = coords.x + 0.0, y = coords.y + 0.0, z = tonumber(coords.z) or 30.0 }
+            local prefersRoad = calloutTemplatePrefersRoad(templateName)
+            local groundZ = calloutFindGroundZ(original.x, original.y, original.z)
+            local nodePos, nodeHeading = calloutGetClosestVehicleNodePosHeading(original.x, original.y, groundZ)
+            local x, y, z = original.x, original.y, groundZ
+
+            local nodeDx = nodePos and ((nodePos.x or original.x) - original.x) or 0.0
+            local nodeDy = nodePos and ((nodePos.y or original.y) - original.y) or 0.0
+            local nodeDist = nodePos and math.sqrt((nodeDx * nodeDx) + (nodeDy * nodeDy)) or 9999.0
+
+            if prefersRoad and nodePos then
+                x, y, z = nodePos.x, nodePos.y, calloutFindGroundZ(nodePos.x, nodePos.y, nodePos.z)
+            else
+                if nodePos and math.abs((groundZ or 0.0) - (nodePos.z or groundZ)) >= 2.0 and nodeDist <= 40.0 then
+                    local sidewalk = calloutPickSidewalkishSpot(nodePos, nodeHeading, original)
+                    if sidewalk then
+                        x, y, z = sidewalk.x, sidewalk.y, sidewalk.z
+                    else
+                        x, y, z = nodePos.x, nodePos.y, calloutFindGroundZ(nodePos.x, nodePos.y, nodePos.z)
+                    end
+                else
+                    local lower = calloutFindLowerNearbyGround(original.x, original.y, groundZ)
+                    if lower and ((groundZ - (lower.z or groundZ)) >= 2.25) then
+                        x, y, z = lower.x, lower.y, lower.z
+                    end
+                end
+            end
+
+            local escape = calloutFindRoofEscapeSpot(x, y, z)
+            if escape then
+                x, y, z = escape.x, escape.y, escape.z
+            end
+
+            return { x = x, y = y, z = z }
+        end
+
+        local function correctNearbyCalloutEntities(center, radius)
+            if not center or not center.x then return end
+            local r = tonumber(radius) or 16.0
+            local function within(entity)
+                if not entity or entity == 0 or not DoesEntityExist(entity) then return false end
+                local c = GetEntityCoords(entity)
+                local dx, dy, dz = c.x - center.x, c.y - center.y, c.z - center.z
+                return ((dx * dx) + (dy * dy) + (dz * dz)) <= (r * r)
+            end
+            for _, ped in ipairs(GetGamePool('CPed')) do
+                if not IsPedAPlayer(ped) and within(ped) then
+                    local c = GetEntityCoords(ped)
+                    local fix = calloutFindRoofEscapeSpot(c.x, c.y, c.z)
+                    if fix then
+                        SetEntityCoordsNoOffset(ped, fix.x, fix.y, (fix.z or c.z) + 0.05, false, false, false)
+                    else
+                        local gz = calloutFindGroundZ(c.x, c.y, c.z)
+                        if gz and math.abs((c.z or 0.0) - gz) > 0.75 then
+                            SetEntityCoordsNoOffset(ped, c.x, c.y, gz + 0.05, false, false, false)
+                        end
+                    end
+                end
+            end
+            for _, veh in ipairs(GetGamePool('CVehicle')) do
+                if within(veh) then
+                    local c = GetEntityCoords(veh)
+                    local fix = calloutFindRoofEscapeSpot(c.x, c.y, c.z)
+                    if fix then
+                        SetEntityCoordsNoOffset(veh, fix.x, fix.y, (fix.z or c.z) + 0.4, false, false, false)
+                    end
+                    SetVehicleOnGroundProperly(veh)
+                end
+            end
+            for _, obj in ipairs(GetGamePool('CObject')) do
+                if within(obj) then
+                    local c = GetEntityCoords(obj)
+                    local fix = calloutFindRoofEscapeSpot(c.x, c.y, c.z)
+                    if fix then
+                        SetEntityCoordsNoOffset(obj, fix.x, fix.y, (fix.z or c.z) + 0.05, false, false, false)
+                    end
+                    PlaceObjectOnGroundProperly(obj)
+                end
+            end
+        end
+
+        RegisterNetEvent("az5pd:callouts:spawn_entities")
+        AddEventHandler("az5pd:callouts:spawn_entities", function(spawnPacket)
             if not spawnPacket or not spawnPacket.id then return end
+
+            local myServerId = GetPlayerServerId(PlayerId())
+            if spawnPacket.assignedTo and tostring(spawnPacket.assignedTo) ~= tostring(myServerId) then
+                log("CLIENT ignoring spawn_entities for id=%s assignedTo=%s (me=%s)", tostring(spawnPacket.id), tostring(spawnPacket.assignedTo), tostring(myServerId))
+                return
+            end
+
             local idstr = tostring(spawnPacket.id)
             active[idstr] = active[idstr] or {}
+            if active[idstr].sceneSpawned then
+                log("CLIENT ignoring duplicate spawn_entities for id=%s", idstr)
+                return
+            end
             active[idstr].data = active[idstr].data or {}
             active[idstr].data.status = "SPAWNED"
+            active[idstr].data.id = idstr
+            if spawnPacket.title then active[idstr].data.title = spawnPacket.title end
+            if spawnPacket.template then active[idstr].data.template = spawnPacket.template end
             active[idstr].data.coords = active[idstr].data.coords or spawnPacket.coords
 
             if type(spawnPacket.clientScript) ~= "string" then
@@ -1197,7 +1615,10 @@ Citizen.CreateThread(function()
                 return
             end
 
-            local ok2, result = pcall(scenarioFunc, spawnPacket.coords)
+            local spawnCoords = sanitizeCalloutCoords(spawnPacket.template, spawnPacket.coords)
+            active[idstr].data.coords = spawnCoords or active[idstr].data.coords
+            moveBlipToCoords(active[idstr].blip, active[idstr].data.coords)
+            local ok2, result = pcall(scenarioFunc, spawnCoords or spawnPacket.coords)
             if not ok2 then
                 log("scenario execution error: %s", tostring(result))
                 doNotify({ id = "callout_spawn_exec_error_" .. idstr, title = "Callout", description = "Scenario execution error", type = "error", duration = 5000 })
@@ -1206,6 +1627,7 @@ Citizen.CreateThread(function()
 
             active[idstr].cleanup = nil
             active[idstr].entities = nil
+            active[idstr].sceneSpawned = true
             if type(result) == "function" then
                 active[idstr].cleanup = result
             elseif type(result) == "table" then
@@ -1219,27 +1641,34 @@ Citizen.CreateThread(function()
                 end
             end
 
+            CreateThread(function()
+                Wait(350)
+                correctNearbyCalloutEntities(spawnCoords or spawnPacket.coords, 18.0)
+                Wait(850)
+                correctNearbyCalloutEntities(spawnCoords or spawnPacket.coords, 18.0)
+            end)
+
             doNotify({ id = "callout_spawned_" .. idstr, title = "Callout", description = "Scenario spawned: " .. tostring(spawnPacket.title or idstr), type = "inform", duration = 5000 })
             log("CLIENT spawn_entities completed for id=%s", idstr)
         end)
 
-        RegisterNetEvent("callouts:ended")
-        AddEventHandler("callouts:ended", function(payload)
+        RegisterNetEvent("az5pd:callouts:ended")
+        AddEventHandler("az5pd:callouts:ended", function(payload)
             if not payload or not payload.id then return end
             local idstr = tostring(payload.id)
             cleanupLocalCallout(idstr)
             pendingAction[idstr] = nil
             doNotify({ id = "callout_ended_" .. idstr, title = "Callout Ended", description = ("Callout %s ended by %s"):format(payload.template or idstr, tostring(payload.endedBy)), type = "success", duration = 5000 })
-            log("CLIENT received callouts:ended id=%s endedBy=%s", idstr, tostring(payload.endedBy))
+            log("CLIENT received az5pd:callouts:ended id=%s endedBy=%s", idstr, tostring(payload.endedBy))
         end)
 
-        RegisterNetEvent("callouts:status_check")
-        AddEventHandler("callouts:status_check", function(pkt)
+        RegisterNetEvent("az5pd:callouts:status_check")
+        AddEventHandler("az5pd:callouts:status_check", function(pkt)
             if not pkt or not pkt.id then return end
             local idstr = tostring(pkt.id)
             active[idstr] = active[idstr] or { data = { id = idstr, title = pkt.title or ("Callout " .. idstr) } }
             active[idstr].data = active[idstr].data or {}
-            active[idstr].data.assignedTo = tostring(GetPlayerServerId(PlayerId()))
+            active[idstr].data.myAttached = true
             assignedCalloutsToMe[idstr] = true
             pendingStatusChecks[idstr] = GetGameTimer() + STATUS_CHECK_TIMEOUT
             doNotify({
@@ -1251,8 +1680,8 @@ Citizen.CreateThread(function()
             log("CLIENT pending status check set for id=%s", idstr)
         end)
 
-        RegisterNetEvent("callouts:status_response_ack")
-        AddEventHandler("callouts:status_response_ack", function(pkt)
+        RegisterNetEvent("az5pd:callouts:status_response_ack")
+        AddEventHandler("az5pd:callouts:status_response_ack", function(pkt)
             if not pkt or not pkt.id then return end
             local idstr = tostring(pkt.id)
             pendingStatusChecks[idstr] = nil
@@ -1260,10 +1689,19 @@ Citizen.CreateThread(function()
             log("CLIENT received status_response_ack for id=%s", idstr)
         end)
 
-        RegisterNetEvent("callouts:player_update")
-        AddEventHandler("callouts:player_update", function(pkt)
+        RegisterNetEvent("az5pd:callouts:player_update")
+        AddEventHandler("az5pd:callouts:player_update", function(pkt)
             if not pkt or not pkt.id then return end
             local idstr = tostring(pkt.id)
+            local entry = active[idstr]
+            if entry and type(pkt.responders) == 'table' then
+                entry.data = entry.data or {}
+                entry.data.responders = pkt.responders
+            end
+            if entry and pkt.assignedTo then
+                entry.data = entry.data or {}
+                entry.data.assignedTo = pkt.assignedTo
+            end
             local action = pkt.action or ""
             local name = pkt.name or ("Player" .. tostring(pkt.player or "unknown"))
             if action == "backup_requested" then
@@ -1302,6 +1740,7 @@ Citizen.CreateThread(function()
             local title = ("Callout %s - %s"):format(idstr, entry.data.title or "unknown")
             local assignedToMe = isCalloutOwnedByMe(idstr)
             local isAccepted = entry.accepted == true or assignedToMe
+            local joinAsBackup = isAccepted and not assignedToMe
 
             local ok, err = pcall(function()
                 lib.registerContext({
@@ -1309,10 +1748,10 @@ Citizen.CreateThread(function()
                     title = title,
                     options = {
                         {
-                            title = "Accept Callout",
-                            description = assignedToMe and "You already own this callout." or (isAccepted and "This callout is already assigned." or "Take this callout if it is still active."),
+                            title = joinAsBackup and "Join Callout" or "Accept Callout",
+                            description = assignedToMe and "You are already attached to this callout." or (joinAsBackup and "Attach as a second unit so your completion clears with the primary." or "Take this callout if it is still active."),
                             icon = "check",
-                            disabled = assignedToMe or isAccepted,
+                            disabled = assignedToMe,
                             onSelect = function()
                                 log("CLIENT menu Accept selected for id=%s", idstr)
                                 acceptCallout(idstr)
@@ -1326,7 +1765,7 @@ Citizen.CreateThread(function()
                             disabled = assignedToMe,
                             onSelect = function()
                                 log("CLIENT menu Deny selected for id=%s", idstr)
-                                TriggerServerEvent("callouts:deny", idstr)
+                                TriggerServerEvent("az5pd:callouts:deny", idstr)
                                 dismissLocalCallout(idstr, 'denied')
                                 lib.hideContext(true)
                             end
@@ -1350,7 +1789,7 @@ Citizen.CreateThread(function()
                                 local x, y, z = table.unpack(coords)
                                 local myName = tostring(GetPlayerName(PlayerId()) or ("Player" .. tostring(GetPlayerServerId(PlayerId()))))
                                 log("CLIENT menu Request Backup for id=%s coords=%.1f,%.1f,%.1f by=%s", idstr, x, y, z, myName)
-                                TriggerServerEvent("callouts:request_backup", idstr, {
+                                TriggerServerEvent("az5pd:callouts:request_backup", idstr, {
                                     coords = {x = x, y = y, z = z},
                                     fromName = myName,
                                     message = "Officer " .. myName .. " requests backup at the scene."
@@ -1360,13 +1799,13 @@ Citizen.CreateThread(function()
                         },
                         {
                             title = "End Callout",
-                            description = "End this callout (must be assigned to you).",
+                            description = "End this callout for every attached unit.",
                             icon = "flag-checkered",
                             disabled = not assignedToMe,
                             onSelect = function()
                                 log("CLIENT menu End Callout selected for id=%s", idstr)
                                 pendingAction[idstr] = "end"
-                                TriggerServerEvent("callouts:end", idstr)
+                                TriggerServerEvent("az5pd:callouts:end", idstr)
                                 startEndAckFallback(idstr, 4000)
                                 lib.hideContext(true)
                             end
@@ -1389,7 +1828,7 @@ Citizen.CreateThread(function()
                             icon = "list",
                             arrow = true,
                             onSelect = function()
-                                showActiveListMenu(idstr) -- pass current id so the list has "Back"
+                                showActiveListMenu(idstr) 
                             end
                         },
                         {
@@ -1412,7 +1851,7 @@ Citizen.CreateThread(function()
                             icon = "map-marker-alt",
                             onSelect = function()
                                 log("CLIENT menu Status On Scene for id=%s", idstr)
-                                TriggerServerEvent("callouts:status_response", idstr, {response = "ON_SCENE"})
+                                TriggerServerEvent("az5pd:callouts:status_response", idstr, {response = "ON_SCENE"})
                                 lib.hideContext(true)
                             end
                         },
@@ -1422,7 +1861,7 @@ Citizen.CreateThread(function()
                             icon = "route",
                             onSelect = function()
                                 log("CLIENT menu Status En Route for id=%s", idstr)
-                                TriggerServerEvent("callouts:status_response", idstr, {response = "EN_ROUTE"})
+                                TriggerServerEvent("az5pd:callouts:status_response", idstr, {response = "EN_ROUTE"})
                                 lib.hideContext(true)
                             end
                         },
@@ -1432,7 +1871,7 @@ Citizen.CreateThread(function()
                             icon = "exclamation-triangle",
                             onSelect = function()
                                 log("CLIENT menu Status Need Assistance for id=%s", idstr)
-                                TriggerServerEvent("callouts:status_response", idstr, {response = "NEED_ASSISTANCE"})
+                                TriggerServerEvent("az5pd:callouts:status_response", idstr, {response = "NEED_ASSISTANCE"})
                                 lib.hideContext(true)
                             end
                         },
@@ -1525,7 +1964,18 @@ Citizen.CreateThread(function()
             if assignedCalloutsToMe[idstr] == true then return true end
             local myServerId = tostring(GetPlayerServerId(PlayerId()))
             local entry = active[idstr]
-            return entry and entry.data and tostring(entry.data.assignedTo or '') == myServerId or false
+            if entry and entry.data then
+                if entry.data.myAttached == true then return true end
+                if tostring(entry.data.assignedTo or '') == myServerId then return true end
+                if type(entry.data.responders) == 'table' then
+                    for _, responder in ipairs(entry.data.responders) do
+                        if responder and tostring(responder.id) == myServerId then
+                            return true
+                        end
+                    end
+                end
+            end
+            return false
         end
 
         local function getAssignedCalloutId()
@@ -1557,7 +2007,7 @@ Citizen.CreateThread(function()
                 doNotify({ id = "callout_status_no_assigned", title = "Callout", description = "You do not have an assigned callout.", type = "warning", duration = 3500 })
                 return
             end
-            TriggerServerEvent("callouts:status_response", id, { response = response })
+            TriggerServerEvent("az5pd:callouts:status_response", id, { response = response })
             doNotify({ id = "callout_status_cmd_" .. tostring(id), title = "Callout", description = "Sent status " .. tostring(response) .. " for " .. tostring(id), type = "success", duration = 3000 })
         end
 
@@ -1630,7 +2080,7 @@ Citizen.CreateThread(function()
                 doNotify({ id = "callout_deny_none", title = "Callout", description = "No callout available to deny.", type = "warning", duration = 3500 })
                 return
             end
-            TriggerServerEvent("callouts:deny", tostring(id))
+            TriggerServerEvent("az5pd:callouts:deny", tostring(id))
             dismissLocalCallout(tostring(id), 'denied')
         end, false)
 
@@ -1641,7 +2091,7 @@ Citizen.CreateThread(function()
                 return
             end
             pendingAction[tostring(id)] = "end"
-            TriggerServerEvent("callouts:end", tostring(id))
+            TriggerServerEvent("az5pd:callouts:end", tostring(id))
             startEndAckFallback(tostring(id), 4000)
         end, false)
 
@@ -1654,7 +2104,7 @@ Citizen.CreateThread(function()
             local coords = GetEntityCoords(PlayerPedId())
             local x, y, z = table.unpack(coords)
             local myName = tostring(GetPlayerName(PlayerId()) or ("Player" .. tostring(GetPlayerServerId(PlayerId()))))
-            TriggerServerEvent("callouts:request_backup", tostring(id), {
+            TriggerServerEvent("az5pd:callouts:request_backup", tostring(id), {
                 coords = { x = x, y = y, z = z },
                 fromName = myName,
                 message = "Officer " .. myName .. " requests backup at the scene."
@@ -1681,9 +2131,16 @@ Citizen.CreateThread(function()
 
         Citizen.CreateThread(function()
             while true do
-                Citizen.Wait(0)
-
                 local menuOpen = (contextOpenCount > 0) or IsNuiFocused()
+                local hasPendingStatus = next(pendingStatusChecks) ~= nil
+                local activePrompt = promptId ~= nil
+                local authorized = az5pdIsAuthorizedNow()
+                if not authorized and not menuOpen and not hasPendingStatus and not activePrompt then
+                    Citizen.Wait(500)
+                else
+                    Citizen.Wait(0)
+                end
+
                 local readingInputs = (not menuOpen) or wantInput()
 
                 if menuOpen then
@@ -1698,7 +2155,7 @@ Citizen.CreateThread(function()
                         local answered = false
                         for id, expiry in pairs(pendingStatusChecks) do
                             if expiry and GetGameTimer() <= expiry then
-                                TriggerServerEvent("callouts:status_response", id, {response = "ON_SCENE"})
+                                TriggerServerEvent("az5pd:callouts:status_response", id, {response = "ON_SCENE"})
                                 pendingStatusChecks[id] = nil
                                 doNotify({ id = "callout_status_resp_sent_" .. id, title = "Status", description = "Confirmed on-scene for " .. id, type = "success", duration = 3000 })
                                 log("E: replied ON_SCENE for id=%s", tostring(id))
@@ -1720,7 +2177,7 @@ Citizen.CreateThread(function()
                         if promptId then
                             local idstr = tostring(promptId)
                             log("G: denying promptId=%s", idstr)
-                            TriggerServerEvent("callouts:deny", idstr)
+                            TriggerServerEvent("az5pd:callouts:deny", idstr)
                             dismissLocalCallout(idstr, 'denied')
                             doNotify({ id = "callout_deny_sent_" .. idstr, title = "Callout", description = "Dismissed callout " .. idstr .. ". It remains active in /calls.", type = "inform", duration = 3500 })
                             promptId = nil
@@ -1749,7 +2206,7 @@ Citizen.CreateThread(function()
                                     if distToCallout(id) <= END_DISTANCE_THRESHOLD then
                                         log("H: requesting end for id=%s", id)
                                         pendingAction[id] = "end"
-                                        TriggerServerEvent("callouts:end", id)
+                                        TriggerServerEvent("az5pd:callouts:end", id)
                                         startEndAckFallback(id, 4000)
                                         doNotify({ id = "callout_end_sent_" .. id, title = "Callout", description = "Requested end for " .. tostring(id), type = "inform", duration = 3000 })
                                     else
@@ -1867,7 +2324,7 @@ Citizen.CreateThread(function()
 
                     local function getDayOfWeekWeight()
                         local dow = GetClockDayOfWeek() or 0
-                        dow = dow % 7  -- keep 0..6 regardless of native specifics
+                        dow = dow % 7  
                         local map = cfg.dayOfWeekWeights or {}
                         return tonumber(map[dow]) or 1.0
                     end
@@ -1890,7 +2347,21 @@ Citizen.CreateThread(function()
                         return false
                     end
 
-                    local function pickSpawnCoords()
+                    local function templateWantsRoadSpawn(templateId)
+                        local name = tostring(templateId or ''):lower()
+                        return name:find('traffic', 1, true) ~= nil
+                            or name:find('vehicle', 1, true) ~= nil
+                            or name:find('driver', 1, true) ~= nil
+                            or name:find('collision', 1, true) ~= nil
+                            or name:find('hazard', 1, true) ~= nil
+                            or name:find('stolen', 1, true) ~= nil
+                            or name:find('reckless', 1, true) ~= nil
+                            or name:find('drunk', 1, true) ~= nil
+                            or name:find('pursuit', 1, true) ~= nil
+                            or name:find('asleep', 1, true) ~= nil
+                    end
+
+                    local function pickSpawnCoords(templateId)
                         local ped = PlayerPedId()
                         local px, py, pz = table.unpack(GetEntityCoords(ped))
                         local last = { x = px + 50.0, y = py + 50.0, z = pz }
@@ -1915,9 +2386,18 @@ Citizen.CreateThread(function()
                                     goto continue_try
                                 end
 
+                                local wantsRoad = templateWantsRoadSpawn(templateId)
                                 local streetHash, crossingHash = GetStreetNameAtCoord(pos.x, pos.y, pos.z)
-                                if streetHash and streetHash ~= 0 then
-
+                                if wantsRoad then
+                                    local okNode, nx2, ny2, nz2 = GetClosestVehicleNode(pos.x, pos.y, pos.z, 1, 3.0, 0)
+                                    if okNode then
+                                        local nodePos = { x = nx2, y = ny2, z = nz2 }
+                                        local roadStreetHash = select(1, GetStreetNameAtCoord(nodePos.x, nodePos.y, nodePos.z))
+                                        if roadStreetHash and roadStreetHash ~= 0 and not tooCloseToExisting(nodePos, minBetween) then
+                                            return nodePos
+                                        end
+                                    end
+                                elseif streetHash and streetHash ~= 0 then
                                     return pos
                                 end
 
@@ -1980,13 +2460,15 @@ Citizen.CreateThread(function()
                         log("Local callout generator enabled (global weighted, no per-.callout config).")
                         while true do
 
-                            if isQuietHour() or weatherBlacklisted() then
+                            if (Config and Config.Jobs and Config.Jobs.requireJob) and not az5pdIsAuthorizedNow() then
+                                Citizen.Wait(5000)
+                            elseif isQuietHour() or weatherBlacklisted() then
                                 Citizen.Wait(5000)
                             else
 
                                 local baseWait = rangeToMs(minT, maxT, unit)
                                 local mul = (getTimeOfDayWeight() * getWeatherWeight() * getDayOfWeekWeight())
-                                mul = math.max(0.25, math.min(mul, 5.0)) -- clamp
+                                mul = math.max(0.25, math.min(mul, 5.0)) 
                                 local waitMs = math.floor(baseWait / mul)
 
                                 local gap   = tonumber(cfg.cooldownBetweenSpawnsMs) or 0
@@ -2006,10 +2488,17 @@ Citizen.CreateThread(function()
                                 end)() >= (cfg.maxSimultaneous or 5) then
                                     Citizen.Wait(2000)
                                 else
-                                    local coords = pickSpawnCoords()
                                     local templateId, title = pickTemplate()
+                                    local coords = pickSpawnCoords(templateId)
                                     local idstr = genLocalId()
-                                    local smallInst = { id = idstr, title = title, coords = coords, template = templateId }
+                                    local playerPos = GetEntityCoords(PlayerPedId())
+                                    local smallInst = {
+                                        id = idstr,
+                                        title = title,
+                                        coords = coords,
+                                        template = templateId,
+                                        playerCoords = { x = playerPos.x + 0.0, y = playerPos.y + 0.0, z = playerPos.z + 0.0 }
+                                    }
 
                                     if notifyOnGenerate then
                                         doNotify({
@@ -2021,11 +2510,11 @@ Citizen.CreateThread(function()
                                     end
 
                                     if useServer then
-                                        TriggerServerEvent("callouts:request_generate", smallInst)
+                                        TriggerServerEvent("az5pd:callouts:request_generate", smallInst)
                                         log("CLIENT requested server to create callout: %s (%s)", tostring(title), tostring(templateId))
                                     else
                                         smallInst._localGenerated = true
-                                        TriggerEvent("callouts:new", smallInst)
+                                        TriggerEvent("az5pd:callouts:new", smallInst)
                                         log("CLIENT locally generated callout: %s (%s) id=%s", tostring(title), tostring(templateId), idstr)
                                     end
 
@@ -2059,6 +2548,7 @@ Citizen.CreateThread(function()
     end
 
     local function waitForFrameworkReady(timeoutMs)
+        if az5pdStandaloneEnabled() then return true end
         local untilT = GetGameTimer() + (timeoutMs or 15000)
         while GetGameTimer() < untilT do
             if type(GetResourceState) == "function" and GetResourceState("Az-Framework") == "started" then
@@ -2073,7 +2563,7 @@ Citizen.CreateThread(function()
         print("[Az-FR | Core System] Az-Framework not started yet; continuing to wait for job sync...")
     end
 
-    Wait(200) -- allow exports to init (JIP-safe)
+    Wait(200) 
 
     local function getJobSync(timeoutMs)
         local job, done = nil, false
@@ -2097,12 +2587,14 @@ Citizen.CreateThread(function()
             if (tries % 10) == 1 then
                 print("[Az-FR | Core System] Waiting for framework job (join-in-progress)... attempt " .. tostring(tries))
             end
-        elseif not isJobAllowed(job) then
-            print("[Az-FR | Core System] You are not an allowed department (" .. tostring(job) .. ").")
-            return
-        else
+        elseif isJobAllowed(job) then
             __az5pd_init(job)
             return
+        else
+            if (tries % 30) == 1 then
+                print("[Az-FR | Core System] Restricted mode idle; waiting for an allowed job. current=" .. tostring(job))
+            end
+            az5pdSetAuthorized(false)
         end
 
         Wait(1000)

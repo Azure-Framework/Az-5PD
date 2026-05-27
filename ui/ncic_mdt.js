@@ -1,22 +1,22 @@
-// NCIC MDT - NUI JavaScript (standalone file)
-// Save as ncic_mdt.js and include in your HTML with <script src="ncic_mdt.js"></script>
-// Handles: sendUI, tabs, close, plate/id lookups (NetID or "First Last"), history selects,
-// NUI message handling for populate, plateResult, idResult, and list population.
+
+
+
+
 
 (function() {
-  // Send to client (FiveM NUI -> client.lua)
+
   function sendUI(event, data) {
     fetch(`https://${GetParentResourceName()}/${event}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json; charset=UTF-8' },
       body: JSON.stringify(data||{})
     }).catch(e => {
-      // swallow fetch errors (NUI may be running outside game during dev)
+
       console.warn('sendUI error', e);
     });
   }
 
-  // --- DOM refs ---
+
   const app             = document.getElementById('app');
   const btnClose        = document.getElementById('btn-close');
 
@@ -32,7 +32,7 @@
   const idResults       = document.getElementById('id-results');
   const idIndicator     = document.getElementById('id-status-indicator');
 
-  // --- Tabs ---
+
   document.querySelectorAll('nav button').forEach(btn=>{
     btn.addEventListener('click',()=>{
       document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
@@ -43,13 +43,13 @@
     });
   });
 
-  // --- Close handlers ---
+
   if(btnClose) btnClose.onclick = () => sendUI('escape', {});
   window.addEventListener('keydown', e=>{
     if(e.key === 'Escape') sendUI('escape', {});
   });
 
-  // --- Lookups (Plate + ID) ---
+
   if(btnPlate) btnPlate.onclick = ()=>{
     const plate = (plateInput.value || "").trim();
     if(plate) sendUI('lookupPlate',{ plate });
@@ -58,20 +58,20 @@
   if(btnId) btnId.onclick = ()=>{
     const v = (idInput.value || "").trim();
     if(!v) {
-      // blank -> let client decide (will default to last stopped ped if available)
+
       sendUI('lookupID', {});
       return;
     }
-    // if contains whitespace treat as name search ("First Last")
+
     if(v.indexOf(' ') !== -1) {
       sendUI('lookupID', { name: v });
     } else {
-      // otherwise NetID
+
       sendUI('lookupID', { netId: v });
     }
   };
 
-  // --- History selects handlers ---
+
   if(plateHistorySel) plateHistorySel.onchange = ()=>{
     const v = plateHistorySel.value;
     if(v) { plateInput.value = v; sendUI('lookupPlate', { plate: v }); }
@@ -85,7 +85,7 @@
     else sendUI('lookupID', { netId: v });
   };
 
-  // --- Helpers to render record blocks ---
+
   function createRecordRow(date, incidentOrType) {
     const rec = document.createElement('div');
     rec.className = 'record';
@@ -102,20 +102,20 @@
     return rec;
   }
 
-  // --- NUI messages (from client.lua) ---
+
   window.addEventListener('message', evt=>{
     const d = evt.data;
     if(!d) return;
 
-    // open/close app
+
     if(d.action === 'open' && app) app.classList.add('open');
     if(d.action === 'close' && app) app.classList.remove('open');
 
-    // populate initial fields and histories
+
     if(d.action === 'populate') {
       if(d.plate != null) plateInput.value = d.plate;
 
-      // prefer lastPedName if available, otherwise netId if present
+
       if(d.lastPedName && d.lastPedName !== "") {
         idInput.value = d.lastPedName;
       } else if(d.netId != null && d.netId !== "") {
@@ -124,7 +124,7 @@
         idInput.value = "";
       }
 
-      // plateHistory array (strings)
+
       if(Array.isArray(d.plateHistory) && plateHistorySel) {
         plateHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
         d.plateHistory.forEach(p=>{
@@ -133,7 +133,7 @@
         });
       }
 
-      // idHistory array (display names or netIds)
+
       if(Array.isArray(d.idHistory) && idHistorySel) {
         idHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
         d.idHistory.forEach(i=>{
@@ -143,7 +143,7 @@
       }
     }
 
-    // plate result rendering
+
     if(d.action === 'plateResult' && plateStatus && plateIndicator) {
       plateStatus.innerHTML = '';
       const st = (d.status || '').toLowerCase();
@@ -185,7 +185,7 @@
       }
     }
 
-    // idResult rendering (for NetID or Name search)
+
     if(d.action === 'idResult' && idResults && idIndicator) {
       idResults.innerHTML = '';
       const ls = (d.licenseStatus || '').toLowerCase();
@@ -211,7 +211,7 @@
       } else {
         records.forEach(r=>{
           const rec = document.createElement('div'); rec.className = 'record';
-          // show friendly name if columns exist
+
           const who = (((r.first_name||'') + (r.last_name ? ' ' + r.last_name : '')).trim()) || r.identifier || r.netId || '';
           rec.innerHTML = `
             <div class="record-field">
@@ -227,7 +227,7 @@
         });
       }
 
-      // update idHistory select with names/identifiers for quick re-search
+
       if(Array.isArray(d.records) && idHistorySel) {
         const unique = [];
         idHistorySel.innerHTML = '<option value="">-- Select previous search --</option>';
@@ -243,6 +243,6 @@
     }
   });
 
-  // Expose sendUI for dev console if needed
+
   window._ncic_sendUI = sendUI;
 })();

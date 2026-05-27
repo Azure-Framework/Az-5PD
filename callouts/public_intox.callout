@@ -3,7 +3,7 @@ return {
   description = "Caller reports a person stumbling around, possibly intoxicated.",
   server = {
     getCoords = function()
-      local base = { x = 130.0, y = -1275.0, z = 29.0 } -- Example near a bar
+      local base = { x = 130.0, y = -1275.0, z = 29.0 } 
       local rx = base.x + math.random(-20, 20)
       local ry = base.y + math.random(-20, 20)
       return { x = rx, y = ry, z = base.z }

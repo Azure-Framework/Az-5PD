@@ -177,6 +177,48 @@ local function extractBracketTag(message)
   return trimText(tag:lower(), 32)
 end
 
+
+local function az5pdStandaloneEnabled()
+  return Config and Config.Standalone == true
+end
+
+local function az5pdHasFramework()
+  return type(GetResourceState) == 'function' and GetResourceState('Az-Framework') == 'started'
+end
+
+local function az5pdAceEntries(key)
+  local cfg = ((Config or {}).AcePermissions or {})
+  local value = cfg[key]
+  if type(value) == 'table' then return value end
+  value = tostring(value or '')
+  if value == '' then return {} end
+  return { value }
+end
+
+local function az5pdHasAce(src, key)
+  src = tonumber(src) or 0
+  if src <= 0 or type(IsPlayerAceAllowed) ~= 'function' then return false end
+  for _, perm in ipairs(az5pdAceEntries(key)) do
+    if perm ~= '' and IsPlayerAceAllowed(src, perm) then return true end
+  end
+  return false
+end
+
+local function az5pdHasStandaloneAccess(src)
+  if not az5pdStandaloneEnabled() then return false end
+  return az5pdHasAce(src, 'open')
+      or az5pdHasAce(src, 'supervisor')
+      or az5pdHasAce(src, 'dispatch')
+      or az5pdHasAce(src, 'admin')
+end
+
+local function az5pdStandaloneJobFor(src)
+  if not az5pdHasStandaloneAccess(src) then return nil end
+  local fallback = tostring((((Config or {}).AcePermissions or {}).fallbackJob) or 'leo')
+  if fallback == '' then fallback = 'leo' end
+  return fallback
+end
+
 local function normalizeJobValue(job)
   if type(job) == 'table' then
     return job.name or job.job or job.id or nil
@@ -186,30 +228,34 @@ local function normalizeJobValue(job)
 end
 
 local function getPlayerJobSafe(src)
-  if type(GetResourceState) == 'function' and GetResourceState('Az-Framework') ~= 'started' then
+  if az5pdHasFramework() then
+    local ok, job = pcall(function()
+      return exports['Az-Framework']:getPlayerJob(src)
+    end)
+    if ok then
+      job = normalizeJobValue(job)
+      if job and tostring(job) ~= '' then return job end
+    end
+  elseif not az5pdStandaloneEnabled() then
     return nil
   end
-  local ok, job = pcall(function()
-    return exports['Az-Framework']:getPlayerJob(src)
-  end)
-  if not ok then return nil end
-  return normalizeJobValue(job)
+  return az5pdStandaloneJobFor(src)
 end
 
 local function isAllowedJob(job)
-  job = tostring(job or '')
+  job = string.lower(tostring(job or ''))
   local cfg = (((Config or {}).Sim or {}).Framework or {}).allowedJobs or (Config.AllowedJobs or {})
   for i = 1, #cfg do
-    if tostring(cfg[i]) == job then return true end
+    if string.lower(tostring(cfg[i] or '')) == job then return true end
   end
   return false
 end
 
 local function isSupervisorJob(job)
-  job = tostring(job or '')
+  job = string.lower(tostring(job or ''))
   local cfg = (((Config or {}).Sim or {}).Framework or {}).supervisorJobs or {}
   for i = 1, #cfg do
-    if tostring(cfg[i]) == job then return true end
+    if string.lower(tostring(cfg[i] or '')) == job then return true end
   end
   return false
 end
@@ -218,11 +264,12 @@ local function isAuthorized(src)
   if not src or src <= 0 then return false end
   local requireJob = not ((((Config or {}).Sim or {}).Framework or {}).requirePoliceJob == false)
   if not requireJob then return true end
-  return isAllowedJob(getPlayerJobSafe(src)) or isSupervisorJob(getPlayerJobSafe(src))
+  local job = getPlayerJobSafe(src)
+  return isAllowedJob(job) or isSupervisorJob(job) or az5pdHasStandaloneAccess(src)
 end
 
 local function isSupervisor(src)
-  return isSupervisorJob(getPlayerJobSafe(src))
+  return az5pdHasAce(src, 'admin') or az5pdHasAce(src, 'supervisor') or isSupervisorJob(getPlayerJobSafe(src))
 end
 
 local function getIdentifier(src)

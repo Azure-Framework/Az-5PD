@@ -1,5 +1,5 @@
 AzServices = AzServices or {}
-AzServices.Debug = AzServices.Debug ~= false  -- keep debug on unless explicitly false
+AzServices.Debug = AzServices.Debug ~= false  
 
 AzServices.Models = AzServices.Models or {
   EMS_VEH   = 'ambulance',
@@ -193,7 +193,7 @@ local function parkVehicleNear(driver, veh, target, stopDist, hdg)
     TaskVehiclePark(driver, veh, target.x, target.y, target.z, hdg or GetEntityHeading(veh), 0, 20.0, true)
     Wait(1200)
   else
-    TaskVehicleTempAction(driver, veh, 27, 1500) -- brake
+    TaskVehicleTempAction(driver, veh, 27, 1500) 
     Wait(800)
   end
 end
@@ -275,7 +275,7 @@ end
 local function getBehindPosition(entity, offsetBack, lateral)
   local pos = GetEntityCoords(entity)
   local fw  = GetEntityForwardVector(entity)
-  local rt  = vector3(fw.y, -fw.x, 0.0) -- right vector
+  local rt  = vector3(fw.y, -fw.x, 0.0) 
   return pos - fw * (offsetBack or 6.0) + rt * (lateral or 0.0)
 end
 

@@ -1,5 +1,17 @@
 Config = Config or {}
 
+Config.Standalone = (Config.Standalone == true)
+
+Config.AcePermissions = Config.AcePermissions or {}
+do
+  local A = Config.AcePermissions
+  if A.open == nil then A.open = 'az_5pd.open' end
+  if A.supervisor == nil then A.supervisor = 'az_5pd.supervisor' end
+  if A.dispatch == nil then A.dispatch = 'az_5pd.dispatch' end
+  if A.admin == nil then A.admin = 'az_5pd.admin' end
+  if A.fallbackJob == nil then A.fallbackJob = 'leo' end
+end
+
 Config.Jobs = Config.Jobs or {}
 do
   local J = Config.Jobs
@@ -26,12 +38,30 @@ do
   }
 end
 
-Config.Debug = (Config.Debug == true)
+Config.Debug = (Config.Debug == false)
 
 Config.AllowedJobs = Config.AllowedJobs or {
-  "police",
-  "ambulance",
-  "fire",
+  'bcso',
+  'sheriff',
+  'lspd',
+  'police',
+  'sast',
+  'state',
+  'trooper',
+  'leo',
+  'ambulance',
+  'fire'
+}
+
+Config.PoliceMenuJobs = Config.PoliceMenuJobs or {
+  'bcso',
+  'sheriff',
+  'lspd',
+  'police',
+  'sast',
+  'state',
+  'trooper',
+  'leo'
 }
 
 Config.Callouts = Config.Callouts or {}
@@ -41,11 +71,12 @@ do
   if C.generatorEnabled == nil then C.generatorEnabled = true end
 
   if C.useServerCreation == nil then C.useServerCreation = true end
+  if C.useCuratedSpawner == nil then C.useCuratedSpawner = true end
 
   C.calltimeRange = C.calltimeRange or { min = 2, max = 7, unit = "minutes" }
   if C.calltimeRange.min == nil then C.calltimeRange.min = 2 end
   if C.calltimeRange.max == nil then C.calltimeRange.max = 7 end
-  if C.calltimeRange.unit == nil then C.calltimeRange.unit = "minutes" end -- "minutes" or "seconds"
+  if C.calltimeRange.unit == nil then C.calltimeRange.unit = "minutes" end 
 
   if C.maxSimultaneous == nil then C.maxSimultaneous = 6 end
   if C.cooldownBetweenSpawnsMs == nil then C.cooldownBetweenSpawnsMs = 128000 end
@@ -53,6 +84,11 @@ do
   if C.minDistanceFromPlayer == nil then C.minDistanceFromPlayer = 60.0 end
   if C.maxDistanceFromPlayer == nil then C.maxDistanceFromPlayer = 400.0 end
   if C.minDistanceBetweenCallouts == nil then C.minDistanceBetweenCallouts = 120.0 end
+
+  if C.curatedMinDistanceFromPlayer == nil then C.curatedMinDistanceFromPlayer = 120.0 end
+  if C.curatedMaxDistanceFromPlayer == nil then C.curatedMaxDistanceFromPlayer = 900.0 end
+  if C.curatedHardMaxDistance == nil then C.curatedHardMaxDistance = 1800.0 end
+  if C.curatedTopChoices == nil then C.curatedTopChoices = 4 end
 
   if C.notifyOnGenerate == nil then C.notifyOnGenerate = true end
 
@@ -69,10 +105,10 @@ do
     [11]=1.00,[12]=1.00,[13]=1.00,[14]=1.00,[15]=1.05,
     [16]=1.05,[17]=1.10,[18]=1.15,[19]=1.20,[20]=1.25,[21]=1.30,[22]=1.35,[23]=1.35
   }
-  if C.timeOfDay.dawn  == nil then C.timeOfDay.dawn  = 1.10 end -- 05–07
-  if C.timeOfDay.day   == nil then C.timeOfDay.day   = 1.00 end -- 08–18
-  if C.timeOfDay.dusk  == nil then C.timeOfDay.dusk  = 1.15 end -- 19–21
-  if C.timeOfDay.night == nil then C.timeOfDay.night = 1.30 end -- 22–04
+  if C.timeOfDay.dawn  == nil then C.timeOfDay.dawn  = 1.10 end 
+  if C.timeOfDay.day   == nil then C.timeOfDay.day   = 1.00 end 
+  if C.timeOfDay.dusk  == nil then C.timeOfDay.dusk  = 1.15 end 
+  if C.timeOfDay.night == nil then C.timeOfDay.night = 1.30 end 
 
   C.weatherWeights = C.weatherWeights or {
     EXTRASUNNY=1.00, CLEAR=1.00, CLOUDS=0.95, OVERCAST=0.90,
@@ -83,8 +119,8 @@ do
 
   C.dayOfWeekWeights = C.dayOfWeekWeights or { [0]=1.05, [1]=1.00, [2]=1.00, [3]=1.00, [4]=1.05, [5]=1.20, [6]=1.25 }
 
-  C.quietHours = C.quietHours or {} -- e.g. { [4]=true } to pause at 4am
-  C.blacklistWeather = C.blacklistWeather or { BLIZZARD = true } -- skip spawns entirely in these weathers
+  C.quietHours = C.quietHours or {} 
+  C.blacklistWeather = C.blacklistWeather or { BLIZZARD = true } 
 end
 
 Config.Wander = Config.Wander or {}
@@ -265,7 +301,7 @@ do
 
   if A.enabled == nil then A.enabled = true end
   if A.maxStrikes == nil then A.maxStrikes = 3 end
-  if A.action == nil then A.action = 'cooldown' end -- cooldown | remove
+  if A.action == nil then A.action = 'cooldown' end 
   if A.cooldownMinutes == nil then A.cooldownMinutes = 30 end
   if A.dropOnRemove == nil then A.dropOnRemove = true end
   if A.blockRemovedOfficers == nil then A.blockRemovedOfficers = true end

@@ -1,9 +1,9 @@
 
     :root {
-      --bg: #0a1a25;              /* screen background */
-      --panel: #132736;           /* panels */
+      --bg: #0a1a25;              
+      --panel: #132736;           
       --glass: rgba(255,255,255,0.05);
-      --accent: #00ff8c;          /* neon MDT green */
+      --accent: #00ff8c;          
       --accent-dim: rgba(0,255,140,0.15);
       --accent-glow: 0 0 10px rgba(0,255,140,0.3);
       --muted: #8fb4b0;
@@ -15,7 +15,7 @@
       --nav-width: 180px;
     }
 
-    /* reset */
+    
     * {
       box-sizing: border-box;
       margin: 0;
@@ -30,9 +30,9 @@
       -webkit-font-smoothing: antialiased;
     }
     
-    /* app container */
+    
     #app {
-      display: none; /* <-- keep hidden by default; .open will show it */
+      display: none; 
       position: absolute;
       left: 50%;
       top: 5%;
@@ -51,7 +51,7 @@
       touch-action: none;
       min-width: 480px;
       min-height: 340px;
-      direction: ltr; /* prevents mirroring issues for the grip */
+      direction: ltr; 
     }
     
     #app.open {
@@ -59,7 +59,7 @@
       animation: mdtIn 0.3s ease-out;
     }
 
-    /* top chrome / header */
+    
     header {
       display: flex;
       align-items: center;
@@ -90,7 +90,7 @@
     .header-status .label { font-size:11px;color:var(--muted); text-transform:uppercase; letter-spacing:1px; margin-bottom:2px; }
     .header-status .value { font-size:14px; color:var(--text); font-weight:700; }
 
-    /* close */
+    
     .close-btn {
       margin-left: 15px;
       background: transparent;
@@ -107,10 +107,10 @@
     }
     .close-btn:hover { background: rgba(255,107,107,0.1); color: var(--danger); }
 
-    /* layout */
+    
     .content { flex: 1; display: grid; grid-template-columns: var(--nav-width) 1fr; gap:0; min-height:0; }
 
-    /* nav */
+    
     nav { background: rgba(0,0,0,0.2); border-right:1px solid var(--border); padding:20px 0; display:flex; flex-direction:column; gap:5px; }
     nav button {
       appearance:none; text-align:left; padding:14px 20px; background:transparent;
@@ -122,7 +122,7 @@
     nav button:hover { background: rgba(0,255,140,0.08); color: var(--accent); }
     nav button.active { background: rgba(0,255,140,0.12); color:var(--accent); border-left-color:var(--accent); }
 
-    /* main area */
+    
     .pane { display:flex; flex-direction:column; gap:0; min-height:0; background: rgba(0,0,0,0.15); }
     .controls { display:grid; grid-template-columns:1fr 1fr; gap:15px; background:var(--panel); padding:20px; border-bottom:1px solid var(--border); }
     .form-group { display:flex; flex-direction:column; gap:8px; }
@@ -170,7 +170,7 @@
     .status.stolen, .status.wanted, .status.suspended, .status.revoked, .status.none { color:var(--danger); background:rgba(255,107,107,0.1); border:1px solid rgba(255,107,107,0.2); }
     .status.expired, .status.expire, .status.pending { color:var(--warning); background:rgba(255,193,7,0.1); border:1px solid rgba(255,193,7,0.2); }
 
-    /* Resize grip (bottom-right inside #app) */
+    
     .resize-grip {
       position: absolute;
       right: 10px;
@@ -191,7 +191,7 @@
     .resize-grip .bars::after { bottom:6px; width:7px; opacity:0.8; }
     .resize-grip .bars div { bottom:11px; width:4px; opacity:0.6; }
 
-    /* tooltip (uses data-tooltip attribute) */
+    
     [data-tooltip] { position: relative; }
     [data-tooltip]::after {
       content: attr(data-tooltip);
@@ -214,10 +214,10 @@
     }
     [data-tooltip]:hover::after { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-    /* accessibility focus for grip */
+    
     .resize-grip:focus { outline: none; box-shadow: 0 0 0 3px rgba(0,255,140,0.12); border-radius: 4px; }
 
-    /* responsive adjustments */
+    
     @media (max-width: 950px) {
       #app { left:50%; transform:translateX(-50%); width:95%; height:85vh; }
       .content { grid-template-columns: 160px 1fr; }

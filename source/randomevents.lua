@@ -31,8 +31,8 @@ Config.RandomEvents = (Config.RandomEvents == nil) and true or Config.RandomEven
 
 Config.ChanceRate = Config.ChanceRate or 0.01
 
-Config.MinIntervalMs = Config.MinIntervalMs or 15000  -- 15s
-Config.MaxIntervalMs = Config.MaxIntervalMs or 30000  -- 30s
+Config.MinIntervalMs = Config.MinIntervalMs or 15000  
+Config.MaxIntervalMs = Config.MaxIntervalMs or 30000  
 
 Config.MaxActiveEvents = Config.MaxActiveEvents or 3
 
@@ -40,9 +40,9 @@ Config.SpawnDistance = Config.SpawnDistance or { min = 60.0, max = 90.0 }
 
 Config.CleanupDistance = Config.CleanupDistance or 250.0
 
-Config.EventTTL = Config.EventTTL or (10 * 60 * 1000) -- 10 minutes
+Config.EventTTL = Config.EventTTL or (10 * 60 * 1000) 
 
-Config.BlipTTL = Config.BlipTTL or (2 * 60 * 1000) -- 2 minutes
+Config.BlipTTL = Config.BlipTTL or (2 * 60 * 1000) 
 
 Config.DebugBlips = (Config.DebugBlips == nil) and true or Config.DebugBlips
 
@@ -73,8 +73,10 @@ Config.VehicleModels = Config.VehicleModels or {
     "fugitive"
 }
 
-Config.RequireJob = Config.RequireJob or false
-Config.AllowedJobs = Config.AllowedJobs or { "BCSO", "LSPD", "SAST", "POLICE", "LEO" }
+if Config.RequireJob == nil then
+    Config.RequireJob = (Config.Jobs and Config.Jobs.requireJob) == true
+end
+Config.AllowedJobs = Config.AllowedJobs or ((Config.Jobs and Config.Jobs.allowed) or { "BCSO", "LSPD", "SAST", "POLICE", "LEO" })
 
 local cachedPlayerJob = nil
 
@@ -103,7 +105,12 @@ local function getPlayerJob()
     return nil
 end
 
-local ActiveEvents = {}  -- [id] = { ... }
+local function isPlayerAuthorized()
+    if not Config.RequireJob then return true end
+    return az5pdJobAllowed(getPlayerJob())
+end
+
+local ActiveEvents = {}  
 local eventIdCounter = 0
 
 local function debugPrint(fmt, ...)
@@ -179,6 +186,14 @@ local function getSpawnPointAhead(dist)
         p.z + fw.z * dist
     )
 
+    local ok, nodePos, nodeHeading = GetClosestVehicleNodeWithHeading(tgt.x, tgt.y, tgt.z, 1, 3.0, 0)
+    if type(ok) == 'boolean' and ok and (type(nodePos) == 'vector3' or type(nodePos) == 'table') then
+        local nz = nodePos.z or tgt.z
+        local found, groundZ = GetGroundZFor_3dCoord(nodePos.x, nodePos.y, nz + 8.0, false)
+        if found then nz = groundZ + 0.2 end
+        return vector3(nodePos.x, nodePos.y, nz), tonumber(nodeHeading) or GetEntityHeading(plyPed)
+    end
+
     local found, groundZ = GetGroundZFor_3dCoord(tgt.x, tgt.y, tgt.z + 10.0, false)
     if found then
         tgt = vector3(tgt.x, tgt.y, groundZ + 0.5)
@@ -190,8 +205,8 @@ end
 local function createBlipAt(pos, sprite, color, text)
     if not Config.DebugBlips then return nil end
     local blip = AddBlipForCoord(pos.x, pos.y, pos.z)
-    SetBlipSprite(blip, sprite or 421)    -- hazard triangle default
-    SetBlipColour(blip, color or 1)       -- red default
+    SetBlipSprite(blip, sprite or 421)    
+    SetBlipColour(blip, color or 1)       
     SetBlipScale(blip, 0.8)
     SetBlipAsShortRange(blip, true)
 
@@ -459,7 +474,7 @@ local function createStreetFight(spawnPos, _heading)
     SetBlockingOfNonTemporaryEvents(pedB, true)
     SetPedFleeAttributes(pedA, 0, false)
     SetPedFleeAttributes(pedB, 0, false)
-    SetPedCombatAttributes(pedA, 5, true) -- will fight
+    SetPedCombatAttributes(pedA, 5, true) 
     SetPedCombatAttributes(pedB, 5, true)
     SetPedCanRagdoll(pedA, true)
     SetPedCanRagdoll(pedB, true)
@@ -536,7 +551,11 @@ end
 
 CreateThread(function()
     while true do
-        Wait(5000)
+        if (not isPlayerAuthorized()) and next(ActiveEvents) == nil then
+            Wait(10000)
+        else
+            Wait(5000)
+        end
 
         local now = GetGameTimer()
         local plyPos = GetEntityCoords(PlayerPedId())
@@ -588,26 +607,17 @@ CreateThread(function()
             goto continue
         end
 
-        if Config.RequireJob then
-            local job = tostring(getPlayerJob() or "CIV")
-            local allowed = false
-            for _, j in ipairs(Config.AllowedJobs) do
-                if job:upper() == tostring(j):upper() then
-                    allowed = true
-                    break
-                end
-            end
-            if not allowed then
-                goto continue
-            end
+        if Config.RequireJob and not isPlayerAuthorized() then
+            Wait(10000)
+            goto continue
         end
 
         local plyPed = PlayerPedId()
         if IsPedInAnyVehicle(plyPed, false) then
             local veh = GetVehiclePedIsIn(plyPed, false)
             if veh and veh ~= 0 and GetPedInVehicleSeat(veh, -1) == plyPed then
-                local speed = GetEntitySpeed(veh) -- m/s
-                if speed > 6.0 then -- ~13.4 mph
+                local speed = GetEntitySpeed(veh) 
+                if speed > 6.0 then 
                     local roll = math.random()
                     debugPrint("Roll=%.3f vs ChanceRate=%.3f", roll, Config.ChanceRate)
                     if roll <= Config.ChanceRate then

@@ -211,6 +211,40 @@ local function roleLabel(key)
   return tostring(key or 'Unit')
 end
 
+local function simPlayerJobName()
+  local state = LocalPlayer and LocalPlayer.state or nil
+  local raw = (state and (state.job or state.department)) or nil
+  if type(raw) == 'table' then
+    raw = raw.name or raw.job or raw.id or raw.label
+  end
+  raw = tostring(raw or ''):lower()
+  if raw == '' or raw == 'nil' or raw == 'none' or raw == 'unemployed' or raw == 'civ' then return '' end
+  return raw
+end
+
+local function simJobAllowedClient(job)
+  job = tostring(job or ''):lower()
+  if job == '' then return false end
+  local cfg = (((Config or {}).Sim or {}).Framework or {}).allowedJobs or (((Config or {}).Jobs or {}).allowed or {}) or (Config.AllowedJobs or {})
+  if type(cfg) == 'table' then
+    for i = 1, #cfg do
+      if tostring(cfg[i] or ''):lower() == job then return true end
+    end
+    for key, value in pairs(cfg) do
+      if value == true and tostring(key or ''):lower() == job then return true end
+    end
+  end
+  return false
+end
+
+local lastSimDeniedToastAt = 0
+local function simDeniedToast(message)
+  local now = GetGameTimer()
+  if now - lastSimDeniedToastAt < 1250 then return end
+  lastSimDeniedToastAt = now
+  simDeniedToast(message or 'Access denied.')
+end
+
 requestStateAndOpen = function(menu)
   local targetSection = menuToSection and menuToSection(menu) or (menu or 'overview')
   SimClient.state.pendingMenu = menu or 'overview'
@@ -1182,7 +1216,7 @@ RegisterNetEvent('az5pd:sim:denied', function(message)
   refreshSimUi()
   refreshSimHud()
   syncMdtBridge()
-  simNotify('Scene Tools', message or 'Access denied.', 'error')
+  simDeniedToast(message or 'Access denied.')
 end)
 
 RegisterNetEvent('az5pd:sim:dispatchCall', function(call)
@@ -1215,10 +1249,18 @@ RegisterNetEvent('az5pd:sim:panicBroadcast', function(data)
 end)
 
 RegisterNetEvent('az5pd:sim:openMenu', function()
+  if not simJobAllowedClient(simPlayerJobName()) then
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   requestStateAndOpen('overview')
 end)
 
 RegisterCommand(tostring((Config.Sim and Config.Sim.menuCommand) or 'az5pdsim'), function()
+  if not simJobAllowedClient(simPlayerJobName()) then
+    simDeniedToast('You are not authorized to use simulation tools.')
+    return
+  end
   requestStateAndOpen('overview')
 end, false)
 RegisterKeyMapping(tostring((Config.Sim and Config.Sim.menuCommand) or 'az5pdsim'), 'Open Az-5PD scene simulation tools', 'keyboard', tostring((Config.Sim and Config.Sim.menuKey) or 'F9'))
@@ -1537,13 +1579,24 @@ CreateThread(function()
   if Config.Sim and Config.Sim.useTargetShortcuts ~= false and exports and exports.ox_target then
     local dist = tonumber((Config.Sim and Config.Sim.targetDistance) or 3.0) or 3.0
     pcall(function()
+      exports.ox_target:removeGlobalPed({'az5pd_sim_tools_ped'})
+      exports.ox_target:removeGlobalVehicle({'az5pd_sim_tools_vehicle'})
+    end)
+    pcall(function()
       exports.ox_target:addGlobalPed({
         {
           name = 'az5pd_sim_tools_ped',
           label = 'Open Scene / Stop Log',
           icon = 'fa-solid fa-clipboard-list',
           distance = dist,
+          canInteract = function(entity, distance, coords, name, bone)
+            return entity and entity ~= 0 and not IsPedAPlayer(entity) and simJobAllowedClient(simPlayerJobName())
+          end,
           onSelect = function(data)
+            if not simJobAllowedClient(simPlayerJobName()) then
+              simDeniedToast('You are not authorized to use simulation tools.')
+              return
+            end
             local entity = data and data.entity
             if entity and entity ~= 0 and not IsPedAPlayer(entity) then
               captureTarget(entity, 'ped')
@@ -1558,7 +1611,14 @@ CreateThread(function()
           label = 'Open Traffic Stop / Scene',
           icon = 'fa-solid fa-car-side',
           distance = dist,
+          canInteract = function(entity, distance, coords, name, bone)
+            return entity and entity ~= 0 and simJobAllowedClient(simPlayerJobName())
+          end,
           onSelect = function(data)
+            if not simJobAllowedClient(simPlayerJobName()) then
+              simDeniedToast('You are not authorized to use simulation tools.')
+              return
+            end
             local entity = data and data.entity
             if entity and entity ~= 0 then
               captureTarget(entity, 'vehicle')

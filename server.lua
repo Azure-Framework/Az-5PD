@@ -1,6 +1,49 @@
 Config = Config or {}
 
 
+local function az5pdStandaloneEnabled()
+  return Config and Config.Standalone == true
+end
+
+local function az5pdHasFramework()
+  return type(GetResourceState) == "function" and GetResourceState("Az-Framework") == "started"
+end
+
+local function az5pdAceEntries(key)
+  local cfg = ((Config or {}).AcePermissions or {})
+  local value = cfg[key]
+  if type(value) == 'table' then return value end
+  value = tostring(value or '')
+  if value == '' then return {} end
+  return { value }
+end
+
+local function az5pdHasAce(src, key)
+  src = tonumber(src) or 0
+  if src <= 0 or type(IsPlayerAceAllowed) ~= 'function' then return false end
+  for _, perm in ipairs(az5pdAceEntries(key)) do
+    if perm ~= '' and IsPlayerAceAllowed(src, perm) then
+      return true
+    end
+  end
+  return false
+end
+
+local function az5pdHasStandaloneAccess(src)
+  if not az5pdStandaloneEnabled() then return false end
+  return az5pdHasAce(src, 'open')
+      or az5pdHasAce(src, 'supervisor')
+      or az5pdHasAce(src, 'dispatch')
+      or az5pdHasAce(src, 'admin')
+end
+
+local function az5pdStandaloneJobFor(src)
+  if not az5pdHasStandaloneAccess(src) then return nil end
+  local fallback = tostring((((Config or {}).AcePermissions or {}).fallbackJob) or 'leo')
+  if fallback == '' then fallback = 'leo' end
+  return fallback
+end
+
 local function az5pdNormalizeJobName(name)
   if name == nil then return nil end
   return string.lower(tostring(name))
@@ -36,27 +79,35 @@ local function normalizeJobValue(job)
 end
 
 local function getPlayerJobSafe(src)
-    if type(GetResourceState) == "function" and GetResourceState("Az-Framework") ~= "started" then
+    if az5pdHasFramework() then
+        local ok, job = pcall(function()
+            return exports["Az-Framework"]:getPlayerJob(src)
+        end)
+        if ok then
+            job = normalizeJobValue(job)
+            if job and tostring(job) ~= '' then return job end
+        end
+    elseif not az5pdStandaloneEnabled() then
         return nil
     end
 
-    local ok, job = pcall(function()
-        return exports["Az-Framework"]:getPlayerJob(src)
-    end)
-    if not ok then return nil end
-    return normalizeJobValue(job)
+    return az5pdStandaloneJobFor(src)
 end
+
+local setPlayerUiAccessState
 
 RegisterNetEvent("AzFR:requestPlayerJob", function()
     local src = source
     local job = getPlayerJobSafe(src)
+    setPlayerUiAccessState(src)
     TriggerClientEvent("AzFR:responsePlayerJob", src, job)
 end)
 
 local function isJobAllowed(job)
-    if not job then return false end
-    for _, allowed in ipairs(Config.AllowedJobs) do
-        if job == allowed then return true end
+    local normalized = az5pdNormalizeJobName(job)
+    if not normalized then return false end
+    for _, allowed in ipairs(Config.AllowedJobs or {}) do
+        if az5pdNormalizeJobName(allowed) == normalized then return true end
     end
     return false
 end
@@ -67,23 +118,109 @@ end
 
 local CalloutTemplates = {}
 local ActiveCallouts = {}
+local getInstance
 local pendingPosRequests = {}
 local log
 math.randomseed(os and os.time() or GetGameTimer())
 local mdtBridgeByCallout = {}
 local startedStatusLoops = {}
+local leoDuty = {}
+local leoDutyDepartment = {}
 
 local function getPlayerNameSafe(src)
     return tostring(GetPlayerName(src) or ("Player" .. tostring(src)))
 end
 
+
+setPlayerUiAccessState = function(src)
+    src = tonumber(src) or 0
+    if src <= 0 then return end
+    local ply = Player(src)
+    if not (ply and ply.state) then return end
+    local job = getPlayerJobSafe(src)
+    local hasAccess = az5pdJobAllowed(job) or az5pdHasStandaloneAccess(src)
+    ply.state.az5pd_hasAccess = hasAccess == true
+end
+
+local function setPlayerDutyState(src, onDuty, selectedDepartment)
+    local ply = Player(src)
+    if ply and ply.state then
+        ply.state.az5pd_onDuty = onDuty == true
+        ply.state.az5pd_department = selectedDepartment or leoDutyDepartment[src] or nil
+    end
+    setPlayerUiAccessState(src)
+end
+
+local function isCalloutResponder(inst, src)
+    src = tonumber(src) or 0
+    return src > 0 and inst and inst.responders and inst.responders[src] ~= nil
+end
+
+local function ensureCalloutResponder(inst, src, status)
+    src = tonumber(src) or 0
+    if src <= 0 or not inst then return nil end
+    inst.responders = inst.responders or {}
+    local entry = inst.responders[src]
+    if not entry then
+        entry = { joinedAt = os.time(), status = status or 'ENROUTE' }
+        inst.responders[src] = entry
+    end
+    entry.status = status or entry.status or 'ENROUTE'
+    entry.lastAt = GetGameTimer()
+    return entry
+end
+
+local function removeCalloutResponder(inst, src)
+    src = tonumber(src) or 0
+    if src <= 0 or not inst or not inst.responders or not inst.responders[src] then return false end
+    inst.responders[src] = nil
+    return true
+end
+
+local function countCalloutResponders(inst)
+    local count = 0
+    for _ in pairs((inst and inst.responders) or {}) do
+        count = count + 1
+    end
+    return count
+end
+
+local function buildCalloutRespondersPayload(inst)
+    local responders = {}
+    for responderSrc, info in pairs((inst and inst.responders) or {}) do
+        responders[#responders + 1] = {
+            id = tonumber(responderSrc) or 0,
+            name = getPlayerNameSafe(responderSrc),
+            status = tostring((info and info.status) or 'ENROUTE')
+        }
+    end
+    table.sort(responders, function(a, b) return (a.id or 0) < (b.id or 0) end)
+    return responders
+end
+
+local function isAttachedToCallout(inst, src)
+    return inst and (tostring(inst.assignedTo or '') == tostring(src) or isCalloutResponder(inst, src)) or false
+end
+
 local function getAssignedCalloutByPlayer(src)
     for _, inst in pairs(ActiveCallouts) do
-        if inst and inst.status == "ASSIGNED" and tostring(inst.assignedTo) == tostring(src) then
+        if inst and inst.status == "ASSIGNED" and isAttachedToCallout(inst, src) then
             return inst
         end
     end
     return nil
+end
+
+local function buildMDTUnitContext(src)
+    return {
+        department = leoDutyDepartment[src] or 'police',
+        role = 'leo',
+        isLEO = true,
+        name = getPlayerNameSafe(src),
+        callsign = ('L-%s'):format(tostring(src)),
+        source = src,
+        playerSource = src
+    }
 end
 
 local function formatCalloutLocation(coords)
@@ -142,21 +279,39 @@ local function hasMDTBridge()
     return resolveMDTResourceName() ~= nil
 end
 
-local function syncCalloutCreateToMDT(inst)
+
+local function isSourceOnDuty(src)
+    src = tonumber(src) or 0
+    return src > 0 and leoDuty[src] == true
+end
+
+local function isSourceAuthorized(src)
+    local job = getPlayerJob(src)
+    if not isJobAllowed(job) then return false end
+    return isSourceOnDuty(src)
+end
+
+local function syncCalloutCreateToMDT(inst, notifyUsers)
     if not inst or inst.mdtCallId then return end
     local mdtResource = resolveMDTResourceName()
     if not mdtResource then return end
     local ok, result = pcall(function()
         return exports[mdtResource]:CreateExternalCall({
             caller = 'Dispatch',
-            message = ('[%s] %s'):format(tostring(inst.template or 'callout'), tostring(inst.description or inst.title or 'Callout')),
+            message = tostring(inst.description or inst.title or 'Callout'),
             location = formatCalloutLocation(inst.coords),
             coords = inst.coords,
             status = inst.mdtStatus or (inst.status == 'ASSIGNED' and 'ENROUTE' or 'PENDING'),
-            type = '5PD',
+            type = 'Police',
+            kind = '911',
             source = 'Az-5PD',
+            sourceResource = GetCurrentResourceName(),
             externalResource = GetCurrentResourceName(),
-            metadata = { calloutId = tostring(inst.id), template = tostring(inst.template or ''), title = tostring(inst.title or 'Callout') }
+            metadata = { calloutId = tostring(inst.id), template = tostring(inst.template or ''), title = tostring(inst.title or 'Callout') },
+            notify = notifyUsers == true,
+            notificationTitle = 'Police Dispatch',
+            notificationType = 'call',
+            notificationMessage = ('%s • %s'):format(tostring(inst.title or 'Callout'), tostring(formatCalloutLocation(inst.coords) or 'Unknown location'))
         })
     end)
     if ok and result then
@@ -176,35 +331,183 @@ local function syncCalloutUpdateToMDT(inst, status)
     local ok, err = pcall(function()
         exports[mdtResource]:UpdateExternalCall(inst.mdtCallId, {
             caller = inst.assignedTo and getPlayerNameSafe(inst.assignedTo) or 'Dispatch',
-            message = ('[%s] %s'):format(tostring(inst.template or 'callout'), tostring(inst.description or inst.title or 'Callout')),
+            message = tostring(inst.description or inst.title or 'Callout'),
             location = formatCalloutLocation(inst.coords),
             coords = inst.coords,
-            status = inst.mdtStatus
+            status = inst.mdtStatus,
+            sourceResource = GetCurrentResourceName(),
+            externalResource = GetCurrentResourceName()
         })
     end)
     if not ok then log('MDT bridge update failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(err)) end
 end
 
 local function syncCalloutAttachToMDT(inst, src)
-    if not inst or not inst.mdtCallId or not src then return end
+    src = tonumber(src) or 0
+    if not inst or src <= 0 then return false end
+    if not inst.mdtCallId then
+        syncCalloutCreateToMDT(inst, false)
+    end
+    if not inst.mdtCallId then
+        log('MDT bridge attach skipped for %s; no mdtCallId', tostring(inst.id))
+        return false
+    end
     local mdtResource = resolveMDTResourceName()
-    if not mdtResource then return end
-    local ok, err = pcall(function() exports[mdtResource]:AttachUnitToExternalCall(inst.mdtCallId, src, true) end)
-    if not ok then log('MDT bridge attach failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(err)) end
+    if not mdtResource then return false end
+    local ok, result = pcall(function() return exports[mdtResource]:AttachUnitToExternalCall(inst.mdtCallId, src, true) end)
+    if not ok or result == false then
+        log('MDT bridge attach failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(result))
+        return false
+    end
+    return true
 end
 
-local function syncUnitStatusToMDT(src, status)
+local function syncCalloutDetachFromMDT(inst, src)
+    src = tonumber(src) or 0
+    if not inst or src <= 0 or not inst.mdtCallId then return false end
+    local mdtResource = resolveMDTResourceName()
+    if not mdtResource then return false end
+    local ok, result = pcall(function() return exports[mdtResource]:DetachUnitFromExternalCall(inst.mdtCallId, src) end)
+    if not ok or result == false then
+        log('MDT bridge detach failed for %s via %s: %s', tostring(inst.id), tostring(mdtResource), tostring(result))
+        return false
+    end
+    return true
+end
+
+local syncUnitStatusToMDT
+
+local function queueCalloutMDTReconcile(calloutId, src, delayMs)
+    src = tonumber(src) or 0
+    local waitMs = math.max(100, tonumber(delayMs) or 500)
+    if src <= 0 then return end
+    SetTimeout(waitMs, function()
+        if GetPlayerPing(src) <= 0 then return end
+        local inst = calloutId ~= nil and ActiveCallouts[tostring(calloutId)] or nil
+        if inst and isAttachedToCallout(inst, src) then
+            syncCalloutUpdateToMDT(inst, inst.mdtStatus or 'ENROUTE')
+            syncCalloutAttachToMDT(inst, src)
+            syncUnitStatusToMDT(src, inst.mdtStatus or 'ENROUTE')
+        end
+    end)
+end
+
+syncUnitStatusToMDT = function(src, status)
     if not src or src == 0 or not (Config and Config.Callouts) or Config.Callouts.syncUnitStatusToMDT == false then return end
     local mdtResource = resolveMDTResourceName()
     if not mdtResource then return end
     local ok, err = pcall(function()
-        return exports[mdtResource]:SetUnitStatusFromExternal(src, status, {})
+        return exports[mdtResource]:SetUnitStatusFromExternal(src, status, buildMDTUnitContext(src))
     end)
     if not ok then log('MDT bridge unit status failed for src=%s via %s: %s', tostring(src), tostring(mdtResource), tostring(err)) end
 end
 
+
+local function detachPlayerFromCallouts(src, reason)
+    src = tonumber(src) or 0
+    if src <= 0 then return end
+
+    for id, inst in pairs(ActiveCallouts) do
+        if inst and isAttachedToCallout(inst, src) then
+            syncCalloutDetachFromMDT(inst, src)
+            syncUnitStatusToMDT(src, 'AVAILABLE')
+            removeCalloutResponder(inst, src)
+
+            if tostring(inst.assignedTo or '') == tostring(src) then
+                inst.assignedTo = nil
+                local responders = buildCalloutRespondersPayload(inst)
+                if responders[1] and responders[1].id then
+                    inst.assignedTo = responders[1].id
+                end
+            end
+
+            if countCalloutResponders(inst) <= 0 then
+                TriggerClientEvent('az5pd:callouts:ended', -1, { id = inst.id, template = inst.template, endedBy = src, reason = reason or 'cleared' })
+                syncCalloutDeleteFromMDT(inst)
+                ActiveCallouts[tostring(id)] = nil
+                startedStatusLoops[tostring(id)] = nil
+            else
+                local responders = buildCalloutRespondersPayload(inst)
+                TriggerClientEvent('az5pd:callouts:player_update', -1, {
+                    id = inst.id,
+                    action = 'unit_detached',
+                    player = src,
+                    name = getPlayerNameSafe(src),
+                    responders = responders,
+                    assignedTo = inst.assignedTo,
+                    timestamp = GetGameTimer()
+                })
+                syncCalloutUpdateToMDT(inst, inst.mdtStatus or 'ENROUTE')
+                for _, responder in ipairs(responders) do
+                    syncCalloutAttachToMDT(inst, responder.id)
+                end
+            end
+        end
+    end
+end
+
+local function setDutyStateInternal(src, desiredState, silent, selectedDepartment)
+    src = tonumber(src) or 0
+    if src <= 0 then return false end
+    if not isJobAllowed(getPlayerJob(src)) then
+        TriggerClientEvent('az5pd:dutyNotify', src, 'error', 'You are not allowed to use Police duty.')
+        return false
+    end
+    desiredState = desiredState == true
+    leoDuty[src] = desiredState
+    if desiredState then
+        local chosen = tostring(selectedDepartment or leoDutyDepartment[src] or getPlayerJob(src) or 'police'):lower()
+        if chosen == '' then chosen = 'police' end
+        leoDutyDepartment[src] = chosen
+        syncUnitStatusToMDT(src, 'AVAILABLE')
+    else
+        detachPlayerFromCallouts(src, 'went_off_duty')
+        leoDutyDepartment[src] = nil
+        syncUnitStatusToMDT(src, 'OFFDUTY')
+    end
+    setPlayerDutyState(src, desiredState, leoDutyDepartment[src])
+    TriggerClientEvent('az5pd:dutyStateUpdated', src, desiredState, leoDutyDepartment[src])
+    return true
+end
+
+RegisterCommand('policeduty', function(src)
+    if src == 0 then return end
+    if resolveMDTResourceName() then
+        TriggerClientEvent('az5pd:dutyNotify', src, 'info', 'Use Az-MDT to go on/off duty for Police.')
+        return
+    end
+    setDutyStateInternal(src, not leoDuty[src], false)
+end, false)
+
+RegisterNetEvent('az5pd:setDutyState', function(desiredState, selectedDepartment)
+    local src = source
+    if resolveMDTResourceName() then
+        TriggerClientEvent('az5pd:dutyNotify', src, 'info', 'Use Az-MDT to go on/off duty for Police.')
+        return
+    end
+    setDutyStateInternal(src, desiredState == true, true, selectedDepartment)
+end)
+
+exports('SetDutyStateFromExternal', function(src, desiredState, ctxOrSilent)
+    local silent = ctxOrSilent == true
+    local selectedDepartment = nil
+    if type(ctxOrSilent) == 'table' then
+        selectedDepartment = ctxOrSilent.department or ctxOrSilent.job or ctxOrSilent.role
+        silent = ctxOrSilent.silent == true
+    end
+    return setDutyStateInternal(src, desiredState == true, silent, selectedDepartment)
+end)
+
+exports('IsOnDuty', function(src)
+    src = tonumber(src) or 0
+    return src > 0 and leoDuty[src] == true
+end)
+
 local function syncCalloutDeleteFromMDT(inst)
     if not inst or not inst.mdtCallId then return end
+    for responderSrc in pairs((inst and inst.responders) or {}) do
+        syncUnitStatusToMDT(responderSrc, 'AVAILABLE')
+    end
     if inst.assignedTo then
         syncUnitStatusToMDT(inst.assignedTo, 'AVAILABLE')
     end
@@ -224,10 +527,15 @@ local function resyncAllCalloutsToMDT()
         if inst then
             inst.mdtCallId = nil
             mdtBridgeByCallout[tostring(inst.id)] = nil
-            syncCalloutCreateToMDT(inst)
+            syncCalloutCreateToMDT(inst, false)
             syncCalloutUpdateToMDT(inst, inst.mdtStatus or (inst.status == 'ASSIGNED' and 'ENROUTE' or 'PENDING'))
-            if inst.status == 'ASSIGNED' and inst.assignedTo then
-                syncCalloutAttachToMDT(inst, inst.assignedTo)
+            if inst.status == 'ASSIGNED' then
+                for responderSrc in pairs((inst and inst.responders) or {}) do
+                    syncCalloutAttachToMDT(inst, responderSrc)
+                end
+                if inst.assignedTo then
+                    syncCalloutAttachToMDT(inst, inst.assignedTo)
+                end
             end
         end
     end
@@ -251,7 +559,7 @@ local function dumpActiveServer()
     end
 end
 
-local function getInstance(id) if id == nil then return nil end return ActiveCallouts[tostring(id)] end
+getInstance = function(id) if id == nil then return nil end return ActiveCallouts[tostring(id)] end
 
 local function genId()
     for i = 1, 10000 do
@@ -319,9 +627,440 @@ local function loadAllTemplates()
     for _, fname in ipairs(toLoad) do pcall(function() loadCalloutFile(fname) end) end
 end
 
+
+local function coord(x, y, z)
+    return { x = x + 0.0, y = y + 0.0, z = z + 0.0 }
+end
+
+local CuratedCalloutPools = {
+    los_santos = {
+        retail = {
+            coord(28.07, -1339.12, 29.50),
+            coord(373.04, 326.45, 103.57),
+            coord(-707.41, -914.61, 19.22),
+            coord(1135.73, -982.89, 46.42),
+            coord(1159.51, -323.98, 69.21),
+            coord(-1487.73, -379.52, 40.16),
+            coord(-1223.74, -907.19, 12.33),
+            coord(-1819.11, 793.64, 138.09)
+        },
+        residential = {
+            coord(-1065.22, -1150.41, 2.16),
+            coord(-1535.61, -425.62, 35.44),
+            coord(312.44, -218.86, 54.22),
+            coord(-614.44, 46.71, 43.59),
+            coord(126.62, -1930.01, 21.38),
+            coord(414.59, -2050.91, 22.10),
+            coord(-36.13, -1447.27, 31.42),
+            coord(-818.77, -1079.20, 11.13)
+        },
+        roadside = {
+            coord(402.07, -1020.31, 29.32),
+            coord(830.11, -1292.41, 26.27),
+            coord(289.64, -584.72, 43.19),
+            coord(-521.14, -220.12, 36.75),
+            coord(1073.56, -775.29, 58.24),
+            coord(-734.37, -2453.12, 13.95),
+            coord(1198.44, -1408.21, 35.23),
+            coord(-211.36, -1167.59, 23.04)
+        },
+        parking = {
+            coord(116.35, -1060.24, 29.19),
+            coord(257.11, -786.84, 30.52),
+            coord(437.23, -980.18, 30.69),
+            coord(-334.85, -781.64, 33.97),
+            coord(-1183.91, -884.13, 13.76),
+            coord(-55.21, -1096.87, 26.42),
+            coord(274.11, -343.23, 44.92),
+            coord(-3185.35, 1100.82, 20.85)
+        },
+        bar = {
+            coord(1987.56, 3054.88, 47.22),
+            coord(-560.34, 286.91, 82.18),
+            coord(126.19, -1286.11, 29.28),
+            coord(-1392.92, -606.23, 30.32),
+            coord(378.94, -327.89, 46.95)
+        },
+        bridge = {
+            coord(436.45, -981.75, 30.69),
+            coord(-248.91, -1002.22, 29.26),
+            coord(299.43, -1443.37, 29.80),
+            coord(-1363.77, -471.69, 31.60)
+        },
+        medical = {
+            coord(307.86, -595.15, 43.28),
+            coord(1839.47, 3672.51, 34.28),
+            coord(-247.18, 6331.26, 32.43)
+        },
+        overdose = {
+            coord(312.44, -218.86, 54.22),
+            coord(414.59, -2050.91, 22.10),
+            coord(-36.13, -1447.27, 31.42),
+            coord(116.35, -1060.24, 29.19),
+            coord(-334.85, -781.64, 33.97),
+            coord(274.11, -343.23, 44.92)
+        }
+    },
+    sandy = {
+        retail = {
+            coord(1963.98, 3741.78, 32.34),
+            coord(1392.64, 3604.55, 34.98),
+            coord(1698.10, 4924.46, 42.06),
+            coord(2678.95, 3280.67, 55.24),
+            coord(1166.19, 2709.19, 38.16),
+            coord(546.55, 2663.34, 42.16)
+        },
+        residential = {
+            coord(1776.44, 3737.12, 34.66),
+            coord(1726.84, 3851.15, 34.79),
+            coord(1869.54, 3690.42, 33.55),
+            coord(1665.90, 4764.62, 42.01),
+            coord(2478.72, 4954.78, 45.03),
+            coord(1447.52, 3655.71, 34.42)
+        },
+        roadside = {
+            coord(1788.42, 3326.85, 41.43),
+            coord(1407.19, 3600.42, 34.92),
+            coord(2712.89, 3457.21, 56.04),
+            coord(2498.84, 4102.31, 38.10),
+            coord(1694.08, 3271.11, 41.15),
+            coord(724.12, 4188.39, 40.71)
+        },
+        parking = {
+            coord(1736.15, 3710.87, 34.14),
+            coord(1855.64, 3683.17, 34.27),
+            coord(2771.46, 3470.42, 55.66),
+            coord(1706.81, 4800.57, 41.79),
+            coord(1200.18, 2662.86, 37.81)
+        },
+        bar = {
+            coord(1981.61, 3052.91, 47.22),
+            coord(1993.47, 3046.13, 47.21),
+            coord(1384.56, 3611.19, 34.89)
+        },
+        bridge = {
+            coord(1662.83, 0.0, 0.0)
+        },
+        medical = {
+            coord(1839.47, 3672.51, 34.28)
+        },
+        overdose = {
+            coord(1776.44, 3737.12, 34.66),
+            coord(1726.84, 3851.15, 34.79),
+            coord(1855.64, 3683.17, 34.27),
+            coord(1384.56, 3611.19, 34.89),
+            coord(1706.81, 4800.57, 41.79)
+        }
+    },
+    paleto = {
+        retail = {
+            coord(1735.55, 6416.29, 35.04),
+            coord(1728.62, 6415.14, 35.04),
+            coord(1702.18, 6425.12, 32.77),
+            coord(-324.32, 6225.51, 31.49),
+            coord(-48.84, 6524.41, 31.49)
+        },
+        residential = {
+            coord(-96.23, 6325.11, 31.58),
+            coord(-231.54, 6355.96, 31.49),
+            coord(-301.80, 6329.34, 32.49),
+            coord(-7.29, 6653.48, 31.11),
+            coord(-112.81, 6470.84, 31.63),
+            coord(-368.83, 6187.74, 31.49)
+        },
+        roadside = {
+            coord(-111.64, 6389.57, 31.48),
+            coord(-31.92, 6445.87, 31.43),
+            coord(154.82, 6637.92, 31.57),
+            coord(-275.44, 6042.76, 31.59),
+            coord(-49.71, 6511.91, 31.49),
+            coord(-439.12, 6025.87, 31.49),
+            coord(-149.63, 6370.88, 31.49),
+            coord(-58.96, 6321.76, 31.49),
+            coord(73.81, 6505.84, 31.43),
+            coord(-250.53, 6129.22, 31.51)
+        },
+        parking = {
+            coord(-116.42, 6468.22, 31.47),
+            coord(-243.37, 6211.63, 31.49),
+            coord(-71.44, 6328.19, 31.49),
+            coord(76.01, 6491.28, 31.43),
+            coord(-329.82, 6248.48, 31.49),
+            coord(-87.55, 6462.63, 31.49),
+            coord(168.92, 6631.54, 31.70)
+        },
+        bar = {
+            coord(-296.45, 6267.61, 31.49),
+            coord(-258.88, 6246.47, 31.49)
+        },
+        bridge = {
+            coord(-61.98, 6458.11, 31.46),
+            coord(-430.02, 6030.55, 31.49)
+        },
+        medical = {
+            coord(-247.18, 6331.26, 32.43)
+        },
+        overdose = {
+            coord(-96.23, 6325.11, 31.58),
+            coord(-231.54, 6355.96, 31.49),
+            coord(-116.42, 6468.22, 31.47),
+            coord(-71.44, 6328.19, 31.49),
+            coord(-87.55, 6462.63, 31.49)
+        }
+    }
+}
+
+
+CuratedCalloutPools.sandy.bridge = {
+    coord(2514.62, 4125.33, 38.59),
+    coord(1709.66, 3337.19, 41.22)
+}
+
+local TemplateSpawnProfiles = {
+    bar_fight = { category = 'bar' },
+    civil_standby = { category = 'residential' },
+    dog_attack = { category = 'residential' },
+    domestic_violence = { category = 'residential' },
+    drunk_driver = { category = 'roadside' },
+    fight_in_progress = { category = 'parking' },
+    hit_and_run_report = { category = 'roadside' },
+    missing_person = { category = 'residential' },
+    noise_complaint = { category = 'residential' },
+    overdose_medical = { category = 'overdose', fallbackCategory = 'parking', minDistance = 90.0, maxDistance = 650.0, jitter = 1.25 },
+    parking_lot_drug_activity = { category = 'parking' },
+    person_in_crisis = { category = 'residential' },
+    person_with_knife = { category = 'parking' },
+    prowler_reported = { category = 'residential' },
+    public_intox = { category = 'bar' },
+    reckless_driver = { category = 'roadside' },
+    residential_alarm = { category = 'residential' },
+    residential_burglary = { category = 'residential' },
+    road_hazard = { category = 'roadside' },
+    robbery_in_progress = { category = 'retail' },
+    shoplifter_detained = { category = 'retail' },
+    shots_fired = { category = 'parking' },
+    stolen_vehicle_occupied = { category = 'roadside' },
+    subject_asleep_at_wheel = { category = 'roadside' },
+    suicidal_subject_bridge = { category = 'bridge' },
+    suspicious_person = { category = 'parking' },
+    suspicious_vehicle = { category = 'parking' },
+    test_1_attack = { category = 'parking' },
+    traffic_collision = { category = 'roadside' },
+    trespasser_refusing_to_leave = { category = 'retail' },
+    vehicle_burglary = { category = 'parking' },
+    vehicle_into_pole = { category = 'roadside' },
+    welfare_check = { category = 'residential' },
+    yelling_person = { category = 'residential' }
+}
+
+local CategorySpawnProfiles = {
+    roadside = { min = 150.0, max = 950.0, hardMax = 1800.0, jitter = 4.0 },
+    parking = { min = 90.0, max = 700.0, hardMax = 1500.0, jitter = 2.5 },
+    residential = { min = 110.0, max = 650.0, hardMax = 1300.0, jitter = 2.5 },
+    retail = { min = 120.0, max = 760.0, hardMax = 1500.0, jitter = 2.5 },
+    bar = { min = 120.0, max = 760.0, hardMax = 1500.0, jitter = 2.5 },
+    bridge = { min = 160.0, max = 1100.0, hardMax = 1900.0, jitter = 3.0 },
+    medical = { min = 120.0, max = 800.0, hardMax = 1500.0, jitter = 2.5 },
+    overdose = { min = 90.0, max = 650.0, hardMax = 1300.0, jitter = 1.25 },
+    pursuit = { min = 220.0, max = 1400.0, hardMax = 2400.0, jitter = 5.0 }
+}
+
+local function distSqCoords(a, b)
+    if not a or not b then return 999999999.0 end
+    local dx = (a.x or 0.0) - (b.x or 0.0)
+    local dy = (a.y or 0.0) - (b.y or 0.0)
+    local dz = (a.z or 0.0) - (b.z or 0.0)
+    return (dx * dx) + (dy * dy) + (dz * dz)
+end
+
+local function shallowCloneCoord(c)
+    if not c then return nil end
+    return { x = c.x + 0.0, y = c.y + 0.0, z = c.z + 0.0 }
+end
+
+local function jitterCoord(c, spread)
+    if not c then return nil end
+    local radius = tonumber(spread) or 3.0
+    local dx = (math.random() * 2.0 - 1.0) * radius
+    local dy = (math.random() * 2.0 - 1.0) * radius
+    return { x = (c.x or 0.0) + dx, y = (c.y or 0.0) + dy, z = c.z or 0.0 }
+end
+
+local function getRegionCenter(name)
+    if name == 'paleto' then return { x = -99.0, y = 6416.0, z = 31.5 } end
+    if name == 'sandy' then return { x = 1847.0, y = 3690.0, z = 33.5 } end
+    return { x = 216.0, y = -925.0, z = 30.0 }
+end
+
+local function chooseRegionNearCoords(playerCoords)
+    local bestName, bestDist = 'los_santos', nil
+    for regionName, _ in pairs(CuratedCalloutPools) do
+        local center = getRegionCenter(regionName)
+        local d = distSqCoords(playerCoords or center, center)
+        if not bestDist or d < bestDist then
+            bestDist = d
+            bestName = regionName
+        end
+    end
+    return bestName
+end
+
+local function getTemplateSpawnProfile(name)
+    if not name then return nil end
+    local key = tostring(name):gsub('%.callout$', '')
+    return TemplateSpawnProfiles[key]
+end
+
+local function getPoolList(regionName, category)
+    local region = CuratedCalloutPools[regionName or 'los_santos'] or CuratedCalloutPools.los_santos
+    local list = region and region[category or 'parking'] or nil
+    if type(list) == 'table' and #list > 0 then return list end
+    if category ~= 'parking' then
+        list = region and region.parking or nil
+        if type(list) == 'table' and #list > 0 then return list end
+    end
+    local ls = CuratedCalloutPools.los_santos
+    return (ls and (ls[category] or ls.parking)) or {}
+end
+
+local function distCoords(a, b)
+    return math.sqrt(distSqCoords(a, b))
+end
+
+local function getSpawnProfileSettings(category, templateProfile)
+    local cfg = (Config and Config.Callouts) or {}
+    local base = CategorySpawnProfiles[category or 'parking'] or CategorySpawnProfiles.parking or {}
+    local out = {
+        min = tonumber(base.min) or 90.0,
+        max = tonumber(base.max) or 700.0,
+        hardMax = tonumber(base.hardMax) or 1500.0,
+        jitter = tonumber(base.jitter) or 2.5,
+    }
+    out.min = tonumber(cfg.curatedMinDistanceFromPlayer) or out.min
+    out.max = tonumber(cfg.curatedMaxDistanceFromPlayer) or out.max
+    out.hardMax = tonumber(cfg.curatedHardMaxDistance) or out.hardMax
+    if type(templateProfile) == 'table' then
+        if templateProfile.minDistance then out.min = tonumber(templateProfile.minDistance) or out.min end
+        if templateProfile.maxDistance then out.max = tonumber(templateProfile.maxDistance) or out.max end
+        if templateProfile.hardMaxDistance then out.hardMax = tonumber(templateProfile.hardMaxDistance) or out.hardMax end
+        if templateProfile.jitter then out.jitter = tonumber(templateProfile.jitter) or out.jitter end
+    end
+    if out.max < out.min then out.max = out.min end
+    if out.hardMax < out.max then out.hardMax = out.max end
+    return out
+end
+
+local function coordTooCloseToActive(point, minDist)
+    local minD = tonumber(minDist) or 120.0
+    for _, inst in pairs(ActiveCallouts) do
+        if inst and inst.coords and inst.status ~= 'ENDED' then
+            local d = distCoords(point, inst.coords)
+            if d <= minD then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function collectPoolCandidates(category, fallbackCategory)
+    local out = {}
+    local seen = {}
+    local function addList(list)
+        if type(list) ~= 'table' then return end
+        for _, point in ipairs(list) do
+            if type(point) == 'table' and point.x and point.y then
+                local key = ('%.2f:%.2f:%.2f'):format(point.x or 0.0, point.y or 0.0, point.z or 0.0)
+                if not seen[key] then
+                    seen[key] = true
+                    out[#out + 1] = point
+                end
+            end
+        end
+    end
+    for _, region in pairs(CuratedCalloutPools) do
+        addList(region[category])
+    end
+    if #out == 0 and fallbackCategory and fallbackCategory ~= category then
+        for _, region in pairs(CuratedCalloutPools) do
+            addList(region[fallbackCategory])
+        end
+    end
+    return out
+end
+
+local function scoreSpawnPoint(point, playerCoords, settings)
+    if not playerCoords or not playerCoords.x then
+        return math.random() * 1000.0
+    end
+    local d = distCoords(playerCoords, point)
+    if d > (settings.hardMax or 1500.0) then return nil end
+    if d < math.max(45.0, (settings.min or 90.0) * 0.55) then return nil end
+    local score = d * 0.02
+    if d < settings.min then
+        score = score + ((settings.min - d) * 4.0)
+    elseif d > settings.max then
+        score = score + ((d - settings.max) * 1.75)
+    else
+        score = score + math.abs(d - ((settings.min + settings.max) * 0.5)) * 0.015
+    end
+    return score, d
+end
+
+local function pickCuratedSpawnForTemplate(templateName, playerCoords)
+    local profile = getTemplateSpawnProfile(templateName) or {}
+    local category = profile.category or 'parking'
+    local fallbackCategory = profile.fallbackCategory or (category ~= 'parking' and 'parking' or nil)
+    local settings = getSpawnProfileSettings(category, profile)
+    local list = collectPoolCandidates(category, fallbackCategory)
+    if not list or #list == 0 then
+        local regionName = chooseRegionNearCoords(playerCoords)
+        list = getPoolList(regionName, category)
+    end
+    if not list or #list == 0 then
+        return nil
+    end
+
+    local minBetween = tonumber((Config and Config.Callouts and Config.Callouts.minDistanceBetweenCallouts) or 120.0) or 120.0
+    local scored = {}
+    for _, point in ipairs(list) do
+        if not coordTooCloseToActive(point, minBetween) then
+            local score, dist = scoreSpawnPoint(point, playerCoords, settings)
+            if score ~= nil then
+                scored[#scored + 1] = { point = point, score = score, dist = dist or 0.0 }
+            end
+        end
+    end
+
+    if #scored == 0 then
+        for _, point in ipairs(list) do
+            local score, dist = scoreSpawnPoint(point, playerCoords, settings)
+            if score ~= nil then
+                scored[#scored + 1] = { point = point, score = score + 250.0, dist = dist or 0.0 }
+            end
+        end
+    end
+
+    if #scored == 0 then
+        return jitterCoord(shallowCloneCoord(list[math.random(#list)]), settings.jitter)
+    end
+
+    table.sort(scored, function(a, b)
+        if a.score == b.score then return a.dist < b.dist end
+        return a.score < b.score
+    end)
+
+    local topN = math.max(1, math.min(#scored, tonumber((Config and Config.Callouts and Config.Callouts.curatedTopChoices) or 4) or 4))
+    local choice = scored[math.random(topN)]
+    return jitterCoord(shallowCloneCoord(choice.point), settings.jitter)
+end
+
 local function makeInstanceFromTemplate(template, coords)
     if not template then return nil end
     local finalCoords = coords
+    if not finalCoords and template and template._name then
+        finalCoords = pickCuratedSpawnForTemplate(template._name, nil)
+    end
     if not finalCoords then
         if template.server then
             if type(template.server.getCoords) == "function" then
@@ -347,6 +1086,7 @@ local function makeInstanceFromTemplate(template, coords)
         awaitingStatus = false,
         lastStatusResponse = nil,
         backupRequests = {},
+        responders = {},
         mdtStatus = 'PENDING'
     }
 
@@ -361,8 +1101,8 @@ end
 
 local function broadcastInstance(inst)
     ActiveCallouts[inst.id] = inst
-    syncCalloutCreateToMDT(inst)
-    TriggerClientEvent("callouts:new", -1, {
+    syncCalloutCreateToMDT(inst, true)
+    TriggerClientEvent("az5pd:callouts:new", -1, {
         id = inst.id,
         template = inst.template,
         title = inst.title,
@@ -378,13 +1118,13 @@ local function requestPlayerPosition(playerServerId, templateName)
     if not playerServerId then return false end
     local requestId = genId() .. "_req"
     pendingPosRequests[requestId] = { src = playerServerId, templateName = templateName, timeoutTick = GetGameTimer() + 5000 }
-    TriggerClientEvent("callouts:request_position", playerServerId, {requestId = requestId})
+    TriggerClientEvent("az5pd:callouts:request_position", playerServerId, {requestId = requestId})
     log("SERVER requested position from player %s for template %s (requestId=%s)", tostring(playerServerId), tostring(templateName), tostring(requestId))
     return requestId
 end
 
-RegisterNetEvent("callouts:position_report")
-AddEventHandler("callouts:position_report", function(requestId, coords)
+RegisterNetEvent("az5pd:callouts:position_report")
+AddEventHandler("az5pd:callouts:position_report", function(requestId, coords)
     local src = source
     local entry = pendingPosRequests[requestId]
     if not entry then log("received position_report for unknown request %s from %d", tostring(requestId), src); return end
@@ -397,10 +1137,14 @@ AddEventHandler("callouts:position_report", function(requestId, coords)
     local tmpl = CalloutTemplates[templateName]
     if not tmpl then log("template not found for position_report: %s", tostring(templateName)); pendingPosRequests[requestId] = nil; return end
 
-    local rx = coords.x + math.random(-25, 25)
-    local ry = coords.y + math.random(-25, 25)
-    local rz = coords.z
-    local inst = makeInstanceFromTemplate(tmpl, {x = rx, y = ry, z = rz})
+    local chosenCoords = pickCuratedSpawnForTemplate(templateName, coords)
+    if not chosenCoords then
+        local rx = coords.x + math.random(-25, 25)
+        local ry = coords.y + math.random(-25, 25)
+        local rz = coords.z
+        chosenCoords = {x = rx, y = ry, z = rz}
+    end
+    local inst = makeInstanceFromTemplate(tmpl, chosenCoords)
     if inst then broadcastInstance(inst) end
 
     pendingPosRequests[requestId] = nil
@@ -468,7 +1212,7 @@ local function startStatusLoopForCallout(calloutId)
             inst.awaitingStatus = true
             log("sending status_check for callout %s to player %s", inst.id, tostring(inst.assignedTo))
             while ActiveCallouts[key] and ActiveCallouts[key].status == "ASSIGNED" and ActiveCallouts[key].awaitingStatus do
-                TriggerClientEvent("callouts:status_check", inst.assignedTo, {id = inst.id, title = inst.title, description = inst.description})
+                TriggerClientEvent("az5pd:callouts:status_check", inst.assignedTo, {id = inst.id, title = inst.title, description = inst.description})
                 Citizen.Wait(10000)
             end
             if not ActiveCallouts[key] then startedStatusLoops[key] = nil return end
@@ -485,69 +1229,158 @@ local function finalizeAssignment(inst, src, extra)
     inst.assignedTo = src
     inst.assignedAt = GetGameTimer()
     inst.mdtStatus = extra.mdtStatus or inst.mdtStatus or 'ENROUTE'
+    ensureCalloutResponder(inst, src, extra.mdtStatus or 'ENROUTE')
 
-    local acceptedPayload = { id = inst.id, template = inst.template, title = inst.title, assignedTo = inst.assignedTo, coords = inst.coords }
+    local acceptedPayload = {
+        id = inst.id,
+        template = inst.template,
+        title = inst.title,
+        assignedTo = inst.assignedTo,
+        coords = inst.coords,
+        responders = buildCalloutRespondersPayload(inst),
+        myAttached = true,
+        primaryResponder = inst.assignedTo
+    }
     if extra.origLocalId then acceptedPayload.origLocalId = extra.origLocalId end
-    TriggerClientEvent("callouts:accepted", -1, acceptedPayload)
-    TriggerClientEvent("callouts:open_menu", inst.assignedTo, inst.id)
+    TriggerClientEvent("az5pd:callouts:accepted", -1, acceptedPayload)
+    TriggerClientEvent("az5pd:callouts:open_menu", inst.assignedTo, inst.id)
 
-    local spawnPacket = { id = inst.id, template = inst.template, title = inst.title, description = inst.description, coords = inst.coords, clientScript = inst.clientScript }
-    TriggerClientEvent("callouts:spawn_entities", -1, spawnPacket)
+    local spawnPacket = {
+        id = inst.id,
+        template = inst.template,
+        title = inst.title,
+        description = inst.description,
+        coords = inst.coords,
+        clientScript = inst.clientScript,
+        assignedTo = inst.assignedTo
+    }
+    TriggerClientEvent("az5pd:callouts:spawn_entities", inst.assignedTo, spawnPacket)
     local acceptName = getPlayerNameSafe(src)
-    TriggerClientEvent("callouts:player_update", -1, { id = inst.id, action = "accepted", player = src, name = acceptName, timestamp = GetGameTimer() })
-    if not inst.mdtCallId then syncCalloutCreateToMDT(inst) end
+    TriggerClientEvent("az5pd:callouts:player_update", -1, {
+        id = inst.id,
+        action = "accepted",
+        player = src,
+        name = acceptName,
+        responders = buildCalloutRespondersPayload(inst),
+        assignedTo = inst.assignedTo,
+        timestamp = GetGameTimer()
+    })
+    if not inst.mdtCallId then syncCalloutCreateToMDT(inst, false) end
     syncCalloutUpdateToMDT(inst, extra.mdtStatus or 'ENROUTE')
     syncCalloutAttachToMDT(inst, src)
     syncUnitStatusToMDT(src, extra.mdtStatus or 'ENROUTE')
+    queueCalloutMDTReconcile(inst.id, src, 350)
+    queueCalloutMDTReconcile(inst.id, src, 1200)
+    queueCalloutMDTReconcile(inst.id, src, 2500)
+    queueCalloutMDTReconcile(inst.id, src, 5000)
+    queueCalloutMDTReconcile(inst.id, src, 8000)
     startStatusLoopForCallout(inst.id)
     log("instance %s assigned to %d and spawn packet sent", inst.id, src)
     dumpActiveServer()
     return true
 end
 
-RegisterNetEvent("callouts:accept")
-AddEventHandler("callouts:accept", function(calloutIdArg)
+local function joinAssignedCallout(inst, src, extra)
+    if not inst or not src then return false end
+    extra = extra or {}
+    local status = extra.mdtStatus or inst.mdtStatus or 'ENROUTE'
+    ensureCalloutResponder(inst, src, status)
+
+    TriggerClientEvent("az5pd:callouts:accepted", src, {
+        id = inst.id,
+        template = inst.template,
+        title = inst.title,
+        assignedTo = inst.assignedTo,
+        coords = inst.coords,
+        responders = buildCalloutRespondersPayload(inst),
+        myAttached = true,
+        primaryResponder = inst.assignedTo,
+        joinedBy = src
+    })
+    TriggerClientEvent("az5pd:callouts:open_menu", src, inst.id)
+    TriggerClientEvent("az5pd:callouts:player_update", -1, {
+        id = inst.id,
+        action = 'joined',
+        player = src,
+        name = getPlayerNameSafe(src),
+        responders = buildCalloutRespondersPayload(inst),
+        assignedTo = inst.assignedTo,
+        timestamp = GetGameTimer()
+    })
+    if not inst.mdtCallId then syncCalloutCreateToMDT(inst, false) end
+    syncCalloutUpdateToMDT(inst, status)
+    syncCalloutAttachToMDT(inst, src)
+    syncUnitStatusToMDT(src, status)
+    queueCalloutMDTReconcile(inst.id, src, 350)
+    queueCalloutMDTReconcile(inst.id, src, 1200)
+    queueCalloutMDTReconcile(inst.id, src, 2500)
+    queueCalloutMDTReconcile(inst.id, src, 5000)
+    queueCalloutMDTReconcile(inst.id, src, 8000)
+    return true
+end
+
+RegisterNetEvent("az5pd:callouts:accept")
+AddEventHandler("az5pd:callouts:accept", function(calloutIdArg)
     local src = source
-    local job = getPlayerJob(src)
-    if not isJobAllowed(job) then TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED") return end
+    if not isSourceAuthorized(src) then TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED") return end
     local calloutId = tostring(calloutIdArg)
     local inst = getInstance(calloutId)
-    if not inst then TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_FOUND") dumpActiveServer() return end
+    if not inst then TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_FOUND") dumpActiveServer() return end
     if inst.status == "ASSIGNED" then
-        if tostring(inst.assignedTo) == tostring(src) then
-            TriggerClientEvent("callouts:accepted", src, { id = inst.id, template = inst.template, title = inst.title, assignedTo = inst.assignedTo, coords = inst.coords })
-            TriggerClientEvent("callouts:open_menu", src, inst.id)
-            if not inst.mdtCallId then syncCalloutCreateToMDT(inst) end
+        if isAttachedToCallout(inst, src) then
+            TriggerClientEvent("az5pd:callouts:accepted", src, {
+                id = inst.id,
+                template = inst.template,
+                title = inst.title,
+                assignedTo = inst.assignedTo,
+                coords = inst.coords,
+                responders = buildCalloutRespondersPayload(inst),
+                myAttached = true,
+                primaryResponder = inst.assignedTo
+            })
+            TriggerClientEvent("az5pd:callouts:open_menu", src, inst.id)
+            if not inst.mdtCallId then syncCalloutCreateToMDT(inst, false) end
             syncCalloutUpdateToMDT(inst, inst.mdtStatus or 'ENROUTE')
             syncCalloutAttachToMDT(inst, src)
             syncUnitStatusToMDT(src, inst.mdtStatus or 'ENROUTE')
+            queueCalloutMDTReconcile(inst.id, src, 350)
+            queueCalloutMDTReconcile(inst.id, src, 1200)
+            queueCalloutMDTReconcile(inst.id, src, 2500)
+            queueCalloutMDTReconcile(inst.id, src, 5000)
+            queueCalloutMDTReconcile(inst.id, src, 8000)
             return
         end
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "ALREADY_TAKEN")
+        local existingAssigned = getAssignedCalloutByPlayer(src)
+        if existingAssigned and tostring(existingAssigned.id) ~= calloutId then
+            TriggerClientEvent("az5pd:callouts:accepted", src, { id = existingAssigned.id, template = existingAssigned.template, title = existingAssigned.title, assignedTo = existingAssigned.assignedTo, coords = existingAssigned.coords, responders = buildCalloutRespondersPayload(existingAssigned), myAttached = true, primaryResponder = existingAssigned.assignedTo })
+            TriggerClientEvent("az5pd:callouts:open_menu", src, existingAssigned.id)
+            TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "ALREADY_ASSIGNED")
+            return
+        end
+        joinAssignedCallout(inst, src, { mdtStatus = inst.mdtStatus or 'ENROUTE' })
         return
     end
-    if inst.status ~= "ACTIVE" then TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_ACTIVE") dumpActiveServer() return end
+    if inst.status ~= "ACTIVE" then TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_ACTIVE") dumpActiveServer() return end
     local existing = getAssignedCalloutByPlayer(src)
     if existing and tostring(existing.id) ~= calloutId then
-        TriggerClientEvent("callouts:accepted", src, { id = existing.id, template = existing.template, title = existing.title, assignedTo = existing.assignedTo, coords = existing.coords })
-        TriggerClientEvent("callouts:open_menu", src, existing.id)
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "ALREADY_ASSIGNED")
+        TriggerClientEvent("az5pd:callouts:accepted", src, { id = existing.id, template = existing.template, title = existing.title, assignedTo = existing.assignedTo, coords = existing.coords, responders = buildCalloutRespondersPayload(existing), myAttached = true, primaryResponder = existing.assignedTo })
+        TriggerClientEvent("az5pd:callouts:open_menu", src, existing.id)
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "ALREADY_ASSIGNED")
         return
     end
     finalizeAssignment(inst, src, { mdtStatus = 'ENROUTE' })
 end)
 
-RegisterNetEvent("callouts:accept_local")
-AddEventHandler("callouts:accept_local", function(smallInst)
+RegisterNetEvent("az5pd:callouts:accept_local")
+AddEventHandler("az5pd:callouts:accept_local", function(smallInst)
     local src = source
-    local job = getPlayerJob(src)
-    if not isJobAllowed(job) then TriggerClientEvent("callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "NOT_AUTHORIZED") return end
+    if not isSourceAuthorized(src) then TriggerClientEvent("az5pd:callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "NOT_AUTHORIZED") return end
     if not smallInst or not smallInst.template then return end
     local existing = getAssignedCalloutByPlayer(src)
     if existing then
-        TriggerClientEvent("callouts:accepted", src, { id = existing.id, template = existing.template, title = existing.title, assignedTo = existing.assignedTo, coords = existing.coords })
-        TriggerClientEvent("callouts:open_menu", src, existing.id)
-        TriggerClientEvent("callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "ALREADY_ASSIGNED")
+        TriggerClientEvent("az5pd:callouts:accepted", src, { id = existing.id, template = existing.template, title = existing.title, assignedTo = existing.assignedTo, coords = existing.coords, responders = buildCalloutRespondersPayload(existing), myAttached = true, primaryResponder = existing.assignedTo })
+        TriggerClientEvent("az5pd:callouts:open_menu", src, existing.id)
+        TriggerClientEvent("az5pd:callouts:action_failed", src, smallInst and smallInst._originLocalId or "local", "ALREADY_ASSIGNED")
         return
     end
     local tmplName = tostring(smallInst.template):gsub("%.callout$", "")
@@ -556,16 +1389,15 @@ AddEventHandler("callouts:accept_local", function(smallInst)
     local inst = makeInstanceFromTemplate(tmpl, smallInst.coords)
     if not inst then return end
     ActiveCallouts[inst.id] = inst
-    syncCalloutCreateToMDT(inst)
+    syncCalloutCreateToMDT(inst, false)
     finalizeAssignment(inst, src, { origLocalId = smallInst._originLocalId, mdtStatus = 'ENROUTE' })
 end)
 
-RegisterNetEvent("callouts:end")
-AddEventHandler("callouts:end", function(calloutIdArg)
+RegisterNetEvent("az5pd:callouts:end")
+AddEventHandler("az5pd:callouts:end", function(calloutIdArg)
     local src = source
-    local job = getPlayerJob(src)
-    if not isJobAllowed(job) then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED")
+    if not isSourceAuthorized(src) then
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED")
         return
     end
 
@@ -573,79 +1405,85 @@ AddEventHandler("callouts:end", function(calloutIdArg)
     log("SERVER player %d attempted to end callout %s", src, calloutId)
     local inst = getInstance(calloutId)
     if not inst then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_FOUND")
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_FOUND")
         log("player %d attempted to end non-existing callout %s", src, tostring(calloutIdArg))
         dumpActiveServer()
         return
     end
-    if tostring(inst.assignedTo) ~= tostring(src) and tonumber(src) ~= 0 then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_ASSIGNED_TO_YOU")
-        log("player %d not assigned to callout %s attempted to end it", src, calloutId)
+    if not isAttachedToCallout(inst, src) and tonumber(src) ~= 0 then
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_ASSIGNED_TO_YOU")
+        log("player %d not attached to callout %s attempted to end it", src, calloutId)
         return
     end
 
     inst.status = "COMPLETED"
-    local releasedUnit = tonumber(inst.assignedTo) or tonumber(src) or 0
-    TriggerClientEvent("callouts:ended", -1, {id = inst.id, template = inst.template, endedBy = src})
-    if releasedUnit > 0 then
-        syncUnitStatusToMDT(releasedUnit, 'AVAILABLE')
+    TriggerClientEvent("az5pd:callouts:ended", -1, {id = inst.id, template = inst.template, endedBy = src})
+    for responderSrc in pairs((inst and inst.responders) or {}) do
+        syncCalloutDetachFromMDT(inst, responderSrc)
+        syncUnitStatusToMDT(responderSrc, 'AVAILABLE')
     end
     syncCalloutDeleteFromMDT(inst)
     ActiveCallouts[calloutId] = nil
     startedStatusLoops[calloutId] = nil
-    log("callout %s ended by %s", calloutId, tostring(src))
+    log("callout %s ended by %s for %s attached unit(s)", calloutId, tostring(src), tostring(countCalloutResponders(inst)))
 end)
 
-RegisterNetEvent("callouts:deny")
-AddEventHandler("callouts:deny", function(calloutIdArg)
+RegisterNetEvent("az5pd:callouts:deny")
+AddEventHandler("az5pd:callouts:deny", function(calloutIdArg)
     local src = source
-    TriggerClientEvent("callouts:denied_feedback", src, calloutIdArg)
+    TriggerClientEvent("az5pd:callouts:denied_feedback", src, calloutIdArg)
     log("%d denied callout %s", src, tostring(calloutIdArg))
 end)
 
-RegisterNetEvent("callouts:status_response")
-AddEventHandler("callouts:status_response", function(calloutIdArg, responseData)
+RegisterNetEvent("az5pd:callouts:status_response")
+AddEventHandler("az5pd:callouts:status_response", function(calloutIdArg, responseData)
     local src = source
     local calloutId = tostring(calloutIdArg)
     local inst = getInstance(calloutId)
     if not inst then log("received status_response for unknown callout %s from %d", tostring(calloutIdArg), src); return end
-    if tostring(inst.assignedTo) ~= tostring(src) then
-        log("received status_response for callout %s from non-assigned player %d (assigned %s)", tostring(calloutId), src, tostring(inst.assignedTo))
+    if not isAttachedToCallout(inst, src) then
+        log("received status_response for callout %s from non-attached player %d (assigned %s)", tostring(calloutId), src, tostring(inst.assignedTo))
         return
     end
     inst.awaitingStatus = false
     inst.lastStatusResponse = {at = GetGameTimer(), data = responseData}
     log("callout %s status_response received from %d (response: %s)", tostring(calloutId), src, tostring(responseData and responseData.response or "nil"))
-    TriggerClientEvent("callouts:status_response_ack", inst.assignedTo, {id = inst.id})
+    TriggerClientEvent("az5pd:callouts:status_response_ack", src, {id = inst.id})
     local pName = tostring(GetPlayerName(src) or ("Player" .. tostring(src)))
     local responseKey = tostring(responseData and responseData.response or "")
     local mdtStatus = ({ ON_SCENE = 'ONSCENE', EN_ROUTE = 'ENROUTE', NEED_ASSISTANCE = 'ASSISTANCE' })[responseKey] or 'ENROUTE'
     local unitStatus = ({ ON_SCENE = 'ONSCENE', EN_ROUTE = 'ENROUTE', NEED_ASSISTANCE = 'ONSCENE' })[responseKey] or 'ENROUTE'
     inst.mdtStatus = mdtStatus
-    if not inst.mdtCallId then syncCalloutCreateToMDT(inst) end
+    local responderEntry = ensureCalloutResponder(inst, src, unitStatus)
+    if responderEntry then responderEntry.status = unitStatus end
+    if not inst.mdtCallId then syncCalloutCreateToMDT(inst, false) end
     syncCalloutUpdateToMDT(inst, mdtStatus)
     syncUnitStatusToMDT(src, unitStatus)
-    TriggerClientEvent("callouts:player_update", -1, { id = inst.id, action = responseData and responseData.response or "status_update", player = src, name = pName, payload = responseData, timestamp = GetGameTimer() })
+    TriggerClientEvent("az5pd:callouts:player_update", -1, { id = inst.id, action = responseData and responseData.response or "status_update", player = src, name = pName, payload = responseData, timestamp = GetGameTimer() })
 end)
 
-RegisterNetEvent("callouts:request_backup")
-AddEventHandler("callouts:request_backup", function(calloutIdArg, data)
+RegisterNetEvent("az5pd:callouts:request_backup")
+AddEventHandler("az5pd:callouts:request_backup", function(calloutIdArg, data)
     local src = source
-    local job = getPlayerJob(src)
-    if not isJobAllowed(job) then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED")
+    if not isSourceAuthorized(src) then
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_AUTHORIZED")
         return
     end
     local calloutId = tostring(calloutIdArg)
     local inst = getInstance(calloutId)
     if not inst then
-        TriggerClientEvent("callouts:action_failed", src, calloutIdArg, "NOT_FOUND")
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_FOUND")
         log("player %d requested backup for unknown callout %s", src, tostring(calloutIdArg))
+        return
+    end
+    if not isAttachedToCallout(inst, src) then
+        TriggerClientEvent("az5pd:callouts:action_failed", src, calloutIdArg, "NOT_ASSIGNED_TO_YOU")
+        log("player %d requested backup for unattached callout %s", src, tostring(calloutIdArg))
         return
     end
     inst.backupRequests = inst.backupRequests or {}
     table.insert(inst.backupRequests, {by = src, payload = data, at = GetGameTimer()})
-    TriggerClientEvent("callouts:player_update", -1, { id = inst.id, action = "backup_requested", player = src, name = tostring(GetPlayerName(src) or ("Player" .. tostring(src))), payload = data, timestamp = GetGameTimer() })
+    TriggerClientEvent("az5pd:callouts:player_update", -1, { id = inst.id, action = "backup_requested", player = src, name = tostring(GetPlayerName(src) or ("Player" .. tostring(src))), payload = data, timestamp = GetGameTimer() })
     log("player %d requested backup for callout %s", src, calloutId)
 end)
 
@@ -662,12 +1500,21 @@ Citizen.CreateThread(function()
     end
 end)
 
-RegisterNetEvent("callouts:request_generate")
-AddEventHandler("callouts:request_generate", function(smallInst)
+
+Citizen.CreateThread(function()
+    while true do
+        Citizen.Wait(5000)
+        for _, src in ipairs(GetPlayers()) do
+            setPlayerUiAccessState(src)
+        end
+    end
+end)
+
+RegisterNetEvent("az5pd:callouts:request_generate")
+AddEventHandler("az5pd:callouts:request_generate", function(smallInst)
     local src = source
-    local job = getPlayerJob(src)
-    if not isJobAllowed(job) then
-        TriggerClientEvent("callouts:action_failed", src, smallInst and smallInst.template or "req", "NOT_AUTHORIZED")
+    if not isSourceAuthorized(src) then
+        TriggerClientEvent("az5pd:callouts:action_failed", src, smallInst and smallInst.template or "req", "NOT_AUTHORIZED")
         return
     end
     if not smallInst or not smallInst.template then log("request_generate missing template from %d", src); return end
@@ -676,10 +1523,26 @@ AddEventHandler("callouts:request_generate", function(smallInst)
     local tmpl = CalloutTemplates[tmplName]
     if not tmpl then log("request_generate unknown template '%s' from %d", tostring(smallInst.template), src); return end
 
-    local coords = smallInst.coords or nil
+    local useCurated = not (Config and Config.Callouts and Config.Callouts.useCuratedSpawner == false)
+    local playerCoords = nil
+    if type(smallInst.playerCoords) == 'table' and smallInst.playerCoords.x then
+        playerCoords = { x = tonumber(smallInst.playerCoords.x) or 0.0, y = tonumber(smallInst.playerCoords.y) or 0.0, z = tonumber(smallInst.playerCoords.z) or 0.0 }
+    elseif type(smallInst.origin) == 'table' and smallInst.origin.x then
+        playerCoords = { x = tonumber(smallInst.origin.x) or 0.0, y = tonumber(smallInst.origin.y) or 0.0, z = tonumber(smallInst.origin.z) or 0.0 }
+    end
+
+    local coords = nil
+    if useCurated and playerCoords then
+        coords = pickCuratedSpawnForTemplate(tmplName, playerCoords)
+    end
+    if not coords then
+        coords = smallInst.coords or nil
+    end
+
     local inst = makeInstanceFromTemplate(tmpl, coords)
     if inst then
         inst.requestedBy = src
+        inst.requestedNear = playerCoords
         broadcastInstance(inst)
         log("generated callout %s from client %d (template %s)", inst.id, src, tmplName)
     end
@@ -692,7 +1555,7 @@ Citizen.CreateThread(function()
         local expireMs = (tonumber(Config and Config.Callouts and Config.Callouts.serverExpireSeconds) or 180) * 1000
         for id, inst in pairs(ActiveCallouts) do
             if inst and inst.status == 'ACTIVE' and inst.createdAt and (now - inst.createdAt) >= expireMs then
-                TriggerClientEvent('callouts:cancelled', -1, { id = inst.id, title = inst.title or ('Callout ' .. tostring(id)) })
+                TriggerClientEvent('az5pd:callouts:cancelled', -1, { id = inst.id, title = inst.title or ('Callout ' .. tostring(id)) })
                 syncCalloutDeleteFromMDT(inst)
                 ActiveCallouts[id] = nil
                 log('expired unassigned callout %s after %d ms', tostring(id), now - inst.createdAt)
@@ -704,18 +1567,22 @@ end)
 exports('AssignCalloutFromMDT', function(calloutId, src)
     src = tonumber(src) or 0
     if src <= 0 then return false, 'INVALID_SOURCE' end
-    local job = getPlayerJob(src)
-    if not isJobAllowed(job) then return false, 'NOT_AUTHORIZED' end
+    if not isSourceAuthorized(src) then return false, 'NOT_AUTHORIZED' end
     local inst = getInstance(calloutId)
     if not inst then return false, 'NOT_FOUND' end
     if inst.status == 'ASSIGNED' then
-        if tostring(inst.assignedTo) == tostring(src) then
+        if isAttachedToCallout(inst, src) then
             syncCalloutUpdateToMDT(inst, inst.mdtStatus or 'ENROUTE')
             syncCalloutAttachToMDT(inst, src)
             syncUnitStatusToMDT(src, inst.mdtStatus or 'ENROUTE')
             return true, inst.id
         end
-        return false, 'ALREADY_TAKEN'
+        local existingAssigned = getAssignedCalloutByPlayer(src)
+        if existingAssigned and tostring(existingAssigned.id) ~= tostring(calloutId) then
+            return false, 'ALREADY_ASSIGNED'
+        end
+        joinAssignedCallout(inst, src, { mdtStatus = inst.mdtStatus or 'ENROUTE' })
+        return true, inst.id
     end
     local existing = getAssignedCalloutByPlayer(src)
     if existing and tostring(existing.id) ~= tostring(calloutId) then finalizeAssignment(existing, src, { mdtStatus = 'ENROUTE' }) return false, 'ALREADY_ASSIGNED' end
@@ -843,3 +1710,20 @@ AddEventHandler('mdt:requestRecords', function(targetType, targetValue)
     end
   )
 end)
+
+
+AddEventHandler('playerDropped', function()
+    local src = source
+    detachPlayerFromCallouts(src, 'disconnected')
+    leoDuty[src] = nil
+    leoDutyDepartment[src] = nil
+end)
+
+RegisterNetEvent('Az-Framework:jobChanged', function(changedSrc)
+    local src = tonumber(changedSrc) or tonumber(source)
+    if not src or src <= 0 then return end
+    setPlayerUiAccessState(src)
+    if leoDuty[src] and not isJobAllowed(getPlayerJob(src)) then
+        setDutyStateInternal(src, false, true)
+    end
+end) 

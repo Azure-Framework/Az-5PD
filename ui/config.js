@@ -1,16 +1,16 @@
 window.NCIC_CONFIG = {
-  // Window title
+
   title: "NCIC MDT - Police Terminal",
-  // Organization / branding
+
   org: {
-    shortName: "LSPD",                       // shown inside the badge if no logoUrl
-    longName: "NCIC — Mobile Data Terminal", // main header title
+    shortName: "LSPD",
+    longName: "NCIC — Mobile Data Terminal",
     subtitle: "In-car terminal · Tactical access",
-    // Optional logo image. If provided, it replaces the badge initials.
-    // Use a path relative to this HTML file or a data URL.
-    logoUrl: "" // e.g. "images/lspd_badge.png"
+
+
+    logoUrl: ""
   },
-  // Theme defaults (can still be changed in the Settings modal)
+
   theme: {
     primary: "#1a5fb4",
     primaryDark: "#154380",
@@ -25,7 +25,7 @@ window.NCIC_CONFIG = {
     border: "#2a2e32",
     success: "#2ec27e"
   },
-  // Per-user defaults (can be changed in the Settings modal)
+
   defaults: {
     unit: "1-L-12",
     officer: "#3467"

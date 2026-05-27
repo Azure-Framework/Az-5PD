@@ -22,8 +22,8 @@ do
 
   S.Framework = S.Framework or {}
   if S.Framework.requirePoliceJob == nil then S.Framework.requirePoliceJob = true end
-  S.Framework.allowedJobs = S.Framework.allowedJobs or { 'police', 'sheriff', 'state', 'trooper', 'leo' }
-  S.Framework.supervisorJobs = S.Framework.supervisorJobs or { 'police_supervisor', 'sheriff_supervisor', 'state_supervisor', 'command', 'dispatch' }
+  S.Framework.allowedJobs = S.Framework.allowedJobs or { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+  S.Framework.supervisorJobs = S.Framework.supervisorJobs or { 'bcso_supervisor', 'sheriff_supervisor', 'lspd_supervisor', 'police_supervisor', 'sast_supervisor', 'state_supervisor', 'command', 'dispatch' }
 
   S.MDTBridge = S.MDTBridge or {}
   if S.MDTBridge.enabled == nil then S.MDTBridge.enabled = true end

@@ -1,9 +1,51 @@
--- server.lua (MDT)
--- + Citation reward payout (random $250-$1250) when issuing a citation to an AI
 
-local fw = exports['Az-Framework']
+
+
 Config = Config or {}
 
+
+local function az5pdStandaloneEnabled()
+  return Config and Config.Standalone == true
+end
+
+local function az5pdHasFramework()
+  return type(GetResourceState) == "function" and GetResourceState('Az-Framework') == "started"
+end
+
+local function az5pdAceEntries(key)
+  local cfg = ((Config or {}).AcePermissions or {})
+  local value = cfg[key]
+  if type(value) == 'table' then return value end
+  value = tostring(value or '')
+  if value == '' then return {} end
+  return { value }
+end
+
+local function az5pdHasAce(src, key)
+  src = tonumber(src) or 0
+  if src <= 0 or type(IsPlayerAceAllowed) ~= 'function' then return false end
+  for _, perm in ipairs(az5pdAceEntries(key)) do
+    if perm ~= '' and IsPlayerAceAllowed(src, perm) then
+      return true
+    end
+  end
+  return false
+end
+
+local function az5pdHasStandaloneAccess(src)
+  if not az5pdStandaloneEnabled() then return false end
+  return az5pdHasAce(src, 'open')
+      or az5pdHasAce(src, 'supervisor')
+      or az5pdHasAce(src, 'dispatch')
+      or az5pdHasAce(src, 'admin')
+end
+
+local function az5pdStandaloneJobFor(src)
+  if not az5pdHasStandaloneAccess(src) then return nil end
+  local fallback = tostring((((Config or {}).AcePermissions or {}).fallbackJob) or 'leo')
+  if fallback == '' then fallback = 'leo' end
+  return fallback
+end
 
 local function az5pdNormalizeJobName(name)
   if name == nil then return nil end
@@ -38,18 +80,23 @@ local getPlayerIdentitySafe
 local isOfficerActionBlocked
 
 local function getPlayerJobSafe(src)
-    local ok, job = pcall(function()
-        return exports['Az-Framework']:getPlayerJob(src)
-    end)
-    if ok then return job end
-    return nil
+    if az5pdHasFramework() then
+        local ok, job = pcall(function()
+            return exports['Az-Framework']:getPlayerJob(src)
+        end)
+        if ok and job ~= nil and tostring(job) ~= '' then return job end
+    elseif not az5pdStandaloneEnabled() then
+        return nil
+    end
+    return az5pdStandaloneJobFor(src)
 end
 
 local function isJobAllowed(job)
-    if not job then return false end
+    local normalized = az5pdNormalizeJobName(job)
+    if not normalized then return false end
     if type(Config.AllowedJobs) ~= 'table' then return false end
     for _, allowed in ipairs(Config.AllowedJobs) do
-        if job == allowed then return true end
+        if az5pdNormalizeJobName(allowed) == normalized then return true end
     end
     return false
 end
@@ -74,16 +121,16 @@ local function ensureAuthorized(src, eventName)
 end
 
 
--- =========================================================
--- CITATION REWARD CONFIG
--- =========================================================
+
+
+
 Config.CitationReward = Config.CitationReward or {
     enabled = true,
     min = 250,
     max = 1250
 }
 
--- Seed RNG once (helps avoid predictable payouts)
+
 CreateThread(function()
     local seed = tonumber(tostring(os.time()):reverse():sub(1, 6)) or os.time()
     math.randomseed(seed)
@@ -101,6 +148,7 @@ local function payCitationReward(src)
 
     local amount = math.random(min, max)
 
+    local fw = az5pdHasFramework() and exports['Az-Framework'] or nil
     if not fw or type(fw.addMoney) ~= "function" then
         print("^1[mdt] Az-Framework export missing: cannot pay citation reward.^0")
         return
@@ -406,7 +454,7 @@ local function _normalizeMdtStatus(raw, seed)
 
     local roll = _stableStatusRoll(seed)
 
-    -- Mostly valid, about 2/11 inactive.
+    
     if roll <= 82 then
         return 'VALID'
     end
@@ -419,7 +467,39 @@ local function normalizeLicenseStatus(raw, seed)
 end
 
 local function normalizeInsuranceStatus(raw, seed)
-    return _normalizeMdtStatus(raw, 'INS:' .. tostring(seed or ''))
+    local s = tostring(raw or ''):upper():gsub('%s+', '')
+
+    if s == 'VALID' or s == 'ACTIVE' or s == 'CLEAR' or s == 'CLEARED' then
+        return 'VALID'
+    end
+
+    if s == 'SUSPENDED' or s == 'SUSPEND' or s == 'SUSP' or s == 'BLOCKED' then
+        return 'SUSPENDED'
+    end
+
+    if s == 'EXPIRED' or s == 'EXPIRE' or s == 'EXP' or s == 'LAPSED' then
+        return 'EXPIRE'
+    end
+
+    if s == 'NONE'
+        or s == 'N/A'
+        or s == 'NA'
+        or s == 'UNKNOWN'
+        or s == 'NOINSURANCE'
+        or s == 'REVOKED'
+        or s == 'MISSING'
+    then
+        return 'NONE'
+    end
+
+    local roll = _stableStatusRoll('INS:' .. tostring(seed or ''))
+
+    
+    if roll <= 90 then
+        return 'VALID'
+    end
+
+    return 'NONE'
 end
 
 local accountabilityCache = {}
@@ -549,10 +629,34 @@ LIMIT 1]], {
     return rows[1]
 end
 
+
+local function normalizeCalloutArrestCategory(arrestContext)
+    arrestContext = type(arrestContext) == 'table' and arrestContext or {}
+    local raw = (tostring(arrestContext.calloutCategory or '') .. ' ' .. tostring(arrestContext.calloutTemplate or '') .. ' ' .. tostring(arrestContext.calloutTitle or '')):lower()
+    if raw == '' then return '' end
+    if raw:find('violent', 1, true) or raw:find('fight', 1, true) or raw:find('domestic', 1, true) or raw:find('knife', 1, true) then
+        return 'violent'
+    end
+    if raw:find('robbery', 1, true) or raw:find('burglary', 1, true) or raw:find('trespass', 1, true) or raw:find('shots_fired', 1, true) then
+        return 'felony'
+    end
+    return ''
+end
+
+local function violentCalloutArrestExempt(arrestContext)
+    local category = normalizeCalloutArrestCategory(arrestContext)
+    if category == 'violent' or category == 'felony' then
+        return true, category
+    end
+    return false, category
+end
+
 local function evaluateArrestGrounds(netId, fullName, arrestContext)
     arrestContext = type(arrestContext) == 'table' and arrestContext or {}
     local groundsCfg = (Config.ArrestAccountability and Config.ArrestAccountability.grounds) or {}
     local matched = {}
+
+    local exempt, exemptCategory = violentCalloutArrestExempt(arrestContext)
 
     local warrant = nil
     if groundsCfg.activeWarrant ~= false then
@@ -582,6 +686,9 @@ local function evaluateArrestGrounds(netId, fullName, arrestContext)
     end
     if groundsCfg.drugImpairment ~= false and arrestContext.high == true then
         matched[#matched + 1] = 'drug_impairment'
+    end
+    if exempt then
+        matched[#matched + 1] = 'callout_' .. tostring(exemptCategory) .. '_arrest_exempt'
     end
 
     return (#matched > 0), matched, normalizedLicense, warrant
@@ -882,8 +989,8 @@ AddEventHandler("mdt:logID", function(netIdStr, identity)
         logID(netIdStr, identifier, (identity and identity.name) or "", "ID Created")
     end)
 
-    -- mdt:logID is a server-side seed/log event used during pull-overs.
-    -- Only explicit ID lookups should send mdt:idResult back to a client.
+    
+    
 end)
 
 RegisterNetEvent("mdt:lookupID")
@@ -1137,9 +1244,9 @@ LIMIT 200;
     })
 end)
 
--- =========================================================
--- CITATIONS / ARRESTS
--- =========================================================
+
+
+
 
 RegisterNetEvent("police:issueCitation")
 AddEventHandler("police:issueCitation", function(netId, reason, fine, fullName)
@@ -1159,7 +1266,7 @@ VALUES (@netId, @identifier, @reason, @fine);
             ["@fine"] = fine
         },
         function()
-            -- ✅ PAY THE PLAYER A RANDOM BONUS FOR CITING AI
+            
             payCitationReward(src)
         end
     )
@@ -1258,7 +1365,7 @@ SELECT status FROM plates WHERE plate = @plate;
                     if not status then
                         local seededStatus = tostring(statusOverride or ""):upper()
                         if seededStatus ~= "VALID" and seededStatus ~= "EXPIRE" and seededStatus ~= "SUSPENDED" and seededStatus ~= "NONE" then
-                            -- Default random seed: about 2/11 inactive, 9/11 valid.
+                            
                             seededStatus = (math.random(11) <= 2) and "NONE" or "VALID"
                         end
                         status = seededStatus

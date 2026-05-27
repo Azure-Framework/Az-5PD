@@ -43,7 +43,6 @@ server_scripts {
 }
 
 dependencies {
-    'Az-Framework',
     'ox_lib',
     'ox_target',
     'oxmysql'
