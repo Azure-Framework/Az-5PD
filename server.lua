@@ -2,96 +2,48 @@ Config = Config or {}
 
 
 local function az5pdStandaloneEnabled()
-  return Config and Config.Standalone == true
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.StandaloneEnabled()
 end
 
 local function az5pdHasFramework()
-  return type(GetResourceState) == "function" and GetResourceState("Az-Framework") == "started"
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.ActiveKind() ~= nil
 end
 
 local function az5pdAceEntries(key)
-  local cfg = ((Config or {}).AcePermissions or {})
-  local value = cfg[key]
-  if type(value) == 'table' then return value end
-  value = tostring(value or '')
-  if value == '' then return {} end
-  return { value }
+  return Az5PD.Framework.AceEntries(key)
 end
 
 local function az5pdHasAce(src, key)
-  src = tonumber(src) or 0
-  if src <= 0 or type(IsPlayerAceAllowed) ~= 'function' then return false end
-  for _, perm in ipairs(az5pdAceEntries(key)) do
-    if perm ~= '' and IsPlayerAceAllowed(src, perm) then
-      return true
-    end
-  end
-  return false
+  return Az5PD.Framework.HasAce(src, key)
 end
 
 local function az5pdHasStandaloneAccess(src)
-  if not az5pdStandaloneEnabled() then return false end
-  return az5pdHasAce(src, 'open')
-      or az5pdHasAce(src, 'supervisor')
-      or az5pdHasAce(src, 'dispatch')
-      or az5pdHasAce(src, 'admin')
+  return Az5PD.Framework.HasStandaloneAccess(src)
 end
 
 local function az5pdStandaloneJobFor(src)
-  if not az5pdHasStandaloneAccess(src) then return nil end
-  local fallback = tostring((((Config or {}).AcePermissions or {}).fallbackJob) or 'leo')
-  if fallback == '' then fallback = 'leo' end
-  return fallback
+  return Az5PD.Framework.StandaloneJob(src)
 end
 
 local function az5pdNormalizeJobName(name)
-  if name == nil then return nil end
-  return string.lower(tostring(name))
+  return Az5PD.Framework.ExtractName(name)
 end
 
 local function az5pdGetAllowedJobs()
-  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
-  if type(cfg) == 'table' and next(cfg) ~= nil then
-    return cfg
-  end
-  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+  return Az5PD.Framework.GetAllowedJobs()
 end
 
 local function az5pdJobAllowed(jobName)
-  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
-  local normalized = az5pdNormalizeJobName(jobName)
-  if not normalized then return false end
-  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
-    if az5pdNormalizeJobName(allowed) == normalized then
-      return true
-    end
-  end
-  return false
+  return Az5PD.Framework.IsAllowedJob(jobName)
 end
 
 
 local function normalizeJobValue(job)
-    if type(job) == "table" then
-        return job.name or job.job or job.id or nil
-    end
-    if job == nil then return nil end
-    return tostring(job)
+    return Az5PD.Framework.ExtractName(job)
 end
 
 local function getPlayerJobSafe(src)
-    if az5pdHasFramework() then
-        local ok, job = pcall(function()
-            return exports["Az-Framework"]:getPlayerJob(src)
-        end)
-        if ok then
-            job = normalizeJobValue(job)
-            if job and tostring(job) ~= '' then return job end
-        end
-    elseif not az5pdStandaloneEnabled() then
-        return nil
-    end
-
-    return az5pdStandaloneJobFor(src)
+    return Az5PD.Framework.GetPlayerJob(src)
 end
 
 local setPlayerUiAccessState
@@ -104,12 +56,7 @@ RegisterNetEvent("AzFR:requestPlayerJob", function()
 end)
 
 local function isJobAllowed(job)
-    local normalized = az5pdNormalizeJobName(job)
-    if not normalized then return false end
-    for _, allowed in ipairs(Config.AllowedJobs or {}) do
-        if az5pdNormalizeJobName(allowed) == normalized then return true end
-    end
-    return false
+    return Az5PD.Framework.IsAllowedJob(job)
 end
 
 local function getPlayerJob(src)
@@ -138,8 +85,16 @@ setPlayerUiAccessState = function(src)
     local ply = Player(src)
     if not (ply and ply.state) then return end
     local job = getPlayerJobSafe(src)
-    local hasAccess = az5pdJobAllowed(job) or az5pdHasStandaloneAccess(src)
+    local hasAccess = Az5PD.Framework.HasAccess(src)
     ply.state.az5pd_hasAccess = hasAccess == true
+    ply.state.az5pd_framework = Az5PD.Framework.ActiveKind() or 'none'
+    if hasAccess and (Az5PD.Framework.ActiveKind() == 'gimic' or (Az5PD.Framework.ActiveKind() == 'qb' and (((Config or {}).Framework or {}).requireDuty == true))) then
+        ply.state.az5pd_onDuty = true
+        ply.state.az5pd_department = job or ply.state.az5pd_department or 'police'
+    elseif not hasAccess and leoDuty[src] ~= true then
+        ply.state.az5pd_onDuty = false
+        ply.state.az5pd_department = nil
+    end
 end
 
 local function setPlayerDutyState(src, onDuty, selectedDepartment)
@@ -449,7 +404,7 @@ end
 local function setDutyStateInternal(src, desiredState, silent, selectedDepartment)
     src = tonumber(src) or 0
     if src <= 0 then return false end
-    if not isJobAllowed(getPlayerJob(src)) then
+    if not (Az5PD.Framework.HasAccess(src) or isJobAllowed(getPlayerJob(src))) then
         TriggerClientEvent('az5pd:dutyNotify', src, 'error', 'You are not allowed to use Police duty.')
         return false
     end
@@ -1727,3 +1682,29 @@ RegisterNetEvent('Az-Framework:jobChanged', function(changedSrc)
         setDutyStateInternal(src, false, true)
     end
 end) 
+
+local function refreshPlayerAccess(src)
+    src = tonumber(src) or tonumber(source)
+    if not src or src <= 0 then return end
+    setPlayerUiAccessState(src)
+    if leoDuty[src] and not Az5PD.Framework.HasAccess(src) and not isJobAllowed(getPlayerJob(src)) then
+        setDutyStateInternal(src, false, true)
+    end
+end
+
+RegisterNetEvent('QBCore:Server:OnPlayerLoaded', function() refreshPlayerAccess(source) end)
+RegisterNetEvent('QBCore:Server:OnJobUpdate', function(src) refreshPlayerAccess(src or source) end)
+RegisterNetEvent('esx:playerLoaded', function(src) refreshPlayerAccess(src or source) end)
+RegisterNetEvent('esx:setJob', function(src) refreshPlayerAccess(src or source) end)
+RegisterNetEvent('gimicCore:server:playerDutyChanged', function(src) refreshPlayerAccess(src or source) end)
+RegisterNetEvent('gimicCore:playerDutyChanged', function(src) refreshPlayerAccess(src or source) end)
+AddEventHandler('playerJoining', function() refreshPlayerAccess(source) end)
+AddEventHandler('onResourceStart', function(resourceName)
+    local resources = ((Config or {}).Framework or {}).resources or {}
+    if resourceName ~= resources.qb and resourceName ~= resources.esx and resourceName ~= resources.gimic and resourceName ~= resources.az then return end
+    SetTimeout(1000, function()
+        for _, playerId in ipairs(GetPlayers() or {}) do
+            refreshPlayerAccess(tonumber(playerId))
+        end
+    end)
+end)

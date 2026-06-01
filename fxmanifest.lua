@@ -2,7 +2,7 @@ fx_version 'cerulean'
 games { 'gta5' }
 
 author 'Azure'
-version '2.0'
+version '2.1.0'
 
 ui_page 'ui/index.html'
 
@@ -22,6 +22,7 @@ shared_scripts {
     '@ox_lib/init.lua',
     'config.lua',
     'names.lua',
+    'shared/framework.lua',
     'shared/sim_config.lua',
 }
 

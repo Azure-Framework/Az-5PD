@@ -1,19 +1,14 @@
 
 local function az5pdNormalizeJobName(name)
-  if name == nil then return nil end
-  return string.lower(tostring(name))
+  return Az5PD.Framework.ExtractName(name)
 end
 
 local function az5pdGetAllowedJobs()
-  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
-  if type(cfg) == 'table' and next(cfg) ~= nil then
-    return cfg
-  end
-  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+  return Az5PD.Framework.GetAllowedJobs()
 end
 
 local function az5pdStandaloneEnabled()
-  return Config and Config.Standalone == true
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.StandaloneEnabled()
 end
 
 function DrawText3D(x, y, z, text)
@@ -32,15 +27,7 @@ function DrawText3D(x, y, z, text)
   end
 
 local function az5pdJobAllowed(jobName)
-  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
-  local normalized = az5pdNormalizeJobName(jobName)
-  if not normalized then return false end
-  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
-    if az5pdNormalizeJobName(allowed) == normalized then
-      return true
-    end
-  end
-  return false
+  return Az5PD.Framework.IsAllowedJob(jobName)
 end
 
 active                   = active                   or {}
@@ -710,11 +697,7 @@ AddEventHandler('onResourceStop', function(resourceName)
 end)
 
 local function isJobAllowed(job)
-    if not job then return false end
-    for _, allowed in ipairs(Config.AllowedJobs) do
-        if job == allowed then return true end
-    end
-    return false
+    return Az5PD.Framework.IsAllowedJob(job)
 end
 
 local function keyReleased(ctrl)
@@ -741,11 +724,7 @@ end
 local function getPlayerJobFromServer(cb)
     assert(type(cb) == "function", "getPlayerJobFromServer requires callback")
 
-    local state = LocalPlayer and LocalPlayer.state or nil
-    local instantJob = nil
-    if state then
-      instantJob = state.department or state.job or nil
-    end
+    local instantJob = Az5PD.Framework.ClientJob()
     if instantJob and tostring(instantJob) ~= '' then
       cb(az5pdNormalizeJobName(instantJob))
       return
@@ -766,8 +745,7 @@ local function getPlayerJobFromServer(cb)
     CreateThread(function()
       Wait(1500)
       if done then return end
-      local fallbackState = LocalPlayer and LocalPlayer.state or nil
-      local fallbackJob = fallbackState and (fallbackState.department or fallbackState.job) or nil
+      local fallbackJob = Az5PD.Framework.ClientJob()
       if fallbackJob and tostring(fallbackJob) ~= '' then
         done = true
         if handlerId then RemoveEventHandler(handlerId) end
@@ -779,20 +757,11 @@ end
 local az5pdAuthState = false
 local az5pdTargetState = false
 local function az5pdCurrentClientJob()
-  local state = LocalPlayer and LocalPlayer.state or nil
-  if state then
-    local v = state.department or state.job or nil
-    if v and tostring(v) ~= '' then return az5pdNormalizeJobName(v) end
-  end
-  return nil
+  return Az5PD.Framework.ClientJob()
 end
 
 local function az5pdHasUiAccess()
-  local state = LocalPlayer and LocalPlayer.state or nil
-  if state and state.az5pd_hasAccess ~= nil then
-    return state.az5pd_hasAccess == true
-  end
-  return az5pdJobAllowed(az5pdCurrentClientJob())
+  return Az5PD.Framework.ClientHasAccess()
 end
 local function az5pdSetAuthorized(state)
   az5pdAuthState = state == true
@@ -834,7 +803,7 @@ end
 
 local function az5pdOpenDutyDialog()
   local currentJob = az5pdCurrentClientJob()
-  if not az5pdJobAllowed(currentJob) then
+  if not Az5PD.Framework.ClientHasAccess() and not az5pdJobAllowed(currentJob) then
     az5pdDutyNotify('error', 'You are not allowed to use Police duty.')
     return
   end
@@ -929,12 +898,7 @@ RegisterCommand('policeduty', function()
 end, false)
 
 local function az5pdIsAuthorizedNow()
-  local j = az5pdCurrentClientJob()
-  if j ~= nil then
-    az5pdAuthState = az5pdJobAllowed(j) and az5pdIsOnDutyState()
-  else
-    az5pdAuthState = az5pdIsOnDutyState()
-  end
+  az5pdAuthState = Az5PD.Framework.ClientHasAccess() and az5pdIsOnDutyState()
   return az5pdAuthState == true
 end
 
@@ -2548,10 +2512,10 @@ Citizen.CreateThread(function()
     end
 
     local function waitForFrameworkReady(timeoutMs)
-        if az5pdStandaloneEnabled() then return true end
+        if Az5PD.Framework.ActiveKind() ~= nil then return true end
         local untilT = GetGameTimer() + (timeoutMs or 15000)
         while GetGameTimer() < untilT do
-            if type(GetResourceState) == "function" and GetResourceState("Az-Framework") == "started" then
+            if Az5PD.Framework.ActiveKind() ~= nil then
                 return true
             end
             Wait(250)
@@ -2560,7 +2524,7 @@ Citizen.CreateThread(function()
     end
 
     if not waitForFrameworkReady(15000) then
-        print("[Az-FR | Core System] Az-Framework not started yet; continuing to wait for job sync...")
+        print("[Az-5PD] No supported framework detected yet; continuing to wait for job sync...")
     end
 
     Wait(200) 
@@ -2587,7 +2551,7 @@ Citizen.CreateThread(function()
             if (tries % 10) == 1 then
                 print("[Az-FR | Core System] Waiting for framework job (join-in-progress)... attempt " .. tostring(tries))
             end
-        elseif isJobAllowed(job) then
+        elseif Az5PD.Framework.ClientHasAccess() or isJobAllowed(job) then
             __az5pd_init(job)
             return
         else

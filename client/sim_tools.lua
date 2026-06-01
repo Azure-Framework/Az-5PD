@@ -212,33 +212,18 @@ local function roleLabel(key)
 end
 
 local function simPlayerJobName()
-  local state = LocalPlayer and LocalPlayer.state or nil
-  local raw = (state and (state.job or state.department)) or nil
-  if type(raw) == 'table' then
-    raw = raw.name or raw.job or raw.id or raw.label
-  end
+  local raw = Az5PD and Az5PD.Framework and Az5PD.Framework.ClientJob() or ''
   raw = tostring(raw or ''):lower()
   if raw == '' or raw == 'nil' or raw == 'none' or raw == 'unemployed' or raw == 'civ' then return '' end
   return raw
 end
 
 local function simJobAllowedClient(job)
-  job = tostring(job or ''):lower()
-  if job == '' then return false end
-  local cfg = (((Config or {}).Sim or {}).Framework or {}).allowedJobs or (((Config or {}).Jobs or {}).allowed or {}) or (Config.AllowedJobs or {})
-  if type(cfg) == 'table' then
-    for i = 1, #cfg do
-      if tostring(cfg[i] or ''):lower() == job then return true end
-    end
-    for key, value in pairs(cfg) do
-      if value == true and tostring(key or ''):lower() == job then return true end
-    end
-  end
-  return false
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.IsAllowedJob(job)
 end
 
 local function canUseSimToolsClient()
-  return simJobAllowedClient(simPlayerJobName())
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.ClientHasAccess()
 end
 
 local function closeDeniedSimSurfaces()

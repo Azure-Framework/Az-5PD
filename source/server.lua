@@ -5,71 +5,39 @@ Config = Config or {}
 
 
 local function az5pdStandaloneEnabled()
-  return Config and Config.Standalone == true
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.StandaloneEnabled()
 end
 
 local function az5pdHasFramework()
-  return type(GetResourceState) == "function" and GetResourceState('Az-Framework') == "started"
+  return Az5PD and Az5PD.Framework and Az5PD.Framework.ActiveKind() ~= nil
 end
 
 local function az5pdAceEntries(key)
-  local cfg = ((Config or {}).AcePermissions or {})
-  local value = cfg[key]
-  if type(value) == 'table' then return value end
-  value = tostring(value or '')
-  if value == '' then return {} end
-  return { value }
+  return Az5PD.Framework.AceEntries(key)
 end
 
 local function az5pdHasAce(src, key)
-  src = tonumber(src) or 0
-  if src <= 0 or type(IsPlayerAceAllowed) ~= 'function' then return false end
-  for _, perm in ipairs(az5pdAceEntries(key)) do
-    if perm ~= '' and IsPlayerAceAllowed(src, perm) then
-      return true
-    end
-  end
-  return false
+  return Az5PD.Framework.HasAce(src, key)
 end
 
 local function az5pdHasStandaloneAccess(src)
-  if not az5pdStandaloneEnabled() then return false end
-  return az5pdHasAce(src, 'open')
-      or az5pdHasAce(src, 'supervisor')
-      or az5pdHasAce(src, 'dispatch')
-      or az5pdHasAce(src, 'admin')
+  return Az5PD.Framework.HasStandaloneAccess(src)
 end
 
 local function az5pdStandaloneJobFor(src)
-  if not az5pdHasStandaloneAccess(src) then return nil end
-  local fallback = tostring((((Config or {}).AcePermissions or {}).fallbackJob) or 'leo')
-  if fallback == '' then fallback = 'leo' end
-  return fallback
+  return Az5PD.Framework.StandaloneJob(src)
 end
 
 local function az5pdNormalizeJobName(name)
-  if name == nil then return nil end
-  return string.lower(tostring(name))
+  return Az5PD.Framework.ExtractName(name)
 end
 
 local function az5pdGetAllowedJobs()
-  local cfg = (Config and Config.Jobs and Config.Jobs.allowed) or nil
-  if type(cfg) == 'table' and next(cfg) ~= nil then
-    return cfg
-  end
-  return { 'bcso', 'sheriff', 'lspd', 'police', 'sast', 'state', 'trooper', 'leo' }
+  return Az5PD.Framework.GetAllowedJobs()
 end
 
 local function az5pdJobAllowed(jobName)
-  if not (Config and Config.Jobs and Config.Jobs.requireJob) then return true end
-  local normalized = az5pdNormalizeJobName(jobName)
-  if not normalized then return false end
-  for _, allowed in ipairs(az5pdGetAllowedJobs()) do
-    if az5pdNormalizeJobName(allowed) == normalized then
-      return true
-    end
-  end
-  return false
+  return Az5PD.Framework.IsAllowedJob(jobName)
 end
 
 
@@ -80,25 +48,11 @@ local getPlayerIdentitySafe
 local isOfficerActionBlocked
 
 local function getPlayerJobSafe(src)
-    if az5pdHasFramework() then
-        local ok, job = pcall(function()
-            return exports['Az-Framework']:getPlayerJob(src)
-        end)
-        if ok and job ~= nil and tostring(job) ~= '' then return job end
-    elseif not az5pdStandaloneEnabled() then
-        return nil
-    end
-    return az5pdStandaloneJobFor(src)
+    return Az5PD.Framework.GetPlayerJob(src)
 end
 
 local function isJobAllowed(job)
-    local normalized = az5pdNormalizeJobName(job)
-    if not normalized then return false end
-    if type(Config.AllowedJobs) ~= 'table' then return false end
-    for _, allowed in ipairs(Config.AllowedJobs) do
-        if az5pdNormalizeJobName(allowed) == normalized then return true end
-    end
-    return false
+    return Az5PD.Framework.IsAllowedJob(job)
 end
 
 local function ensureAuthorized(src, eventName)
@@ -115,7 +69,7 @@ local function ensureAuthorized(src, eventName)
     end
 
     local job = getPlayerJobSafe(src)
-    if isJobAllowed(job) then return true end
+    if Az5PD.Framework.HasAccess(src) or isJobAllowed(job) then return true end
     print(("^1[mdt] blocked unauthorized event %s from src=%s job=%s^0"):format(tostring(eventName), tostring(src), tostring(job)))
     return false
 end
@@ -148,13 +102,7 @@ local function payCitationReward(src)
 
     local amount = math.random(min, max)
 
-    local fw = az5pdHasFramework() and exports['Az-Framework'] or nil
-    if not fw or type(fw.addMoney) ~= "function" then
-        print("^1[mdt] Az-Framework export missing: cannot pay citation reward.^0")
-        return
-    end
-
-    local ok = fw:addMoney(src, amount)
+    local ok = Az5PD.Framework.AddMoney(src, amount)
     if ok then
         safeTriggerClientEvent("chat:addMessage", src, { args = { "^2MDT", ("Citation bonus: $%d"):format(amount) } })
     else

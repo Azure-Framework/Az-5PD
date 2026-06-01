@@ -2,6 +2,19 @@ Config = Config or {}
 
 Config.Standalone = (Config.Standalone == true)
 
+Config.Framework = Config.Framework or {}
+do
+  local F = Config.Framework
+  F.mode = F.mode or 'auto'
+  F.prefer = F.prefer or { 'gimic', 'qb', 'esx', 'az', 'standalone' }
+  F.resources = F.resources or {}
+  F.resources.gimic = F.resources.gimic or 'gimicCore'
+  F.resources.qb = F.resources.qb or 'qb-core'
+  F.resources.esx = F.resources.esx or 'es_extended'
+  F.resources.az = F.resources.az or 'Az-Framework'
+  if F.requireDuty == nil then F.requireDuty = false end
+end
+
 Config.AcePermissions = Config.AcePermissions or {}
 do
   local A = Config.AcePermissions
