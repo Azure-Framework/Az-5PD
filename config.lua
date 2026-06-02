@@ -1,12 +1,10 @@
 Config = Config or {}
 
-Config.Standalone = (Config.Standalone == true)
-
-Config.Framework = Config.Framework or 'auto'
-Config.FrameworkRequireDuty = (Config.FrameworkRequireDuty == true)
-Config.FrameworkDebug = (Config.FrameworkDebug == true)
-Config.FrameworkPriority = Config.FrameworkPriority or { 'gimic', 'qb', 'esx', 'az', 'standalone' }
-Config.FrameworkResources = Config.FrameworkResources or {
+Config.Framework = 'auto'
+Config.FrameworkRequireDuty = false
+Config.FrameworkDebug = false
+Config.FrameworkPriority = { 'gimic', 'qb', 'esx', 'az', 'standalone' }
+Config.FrameworkResources = {
   gimic = 'gimicCore',
   qb = 'qb-core',
   esx = 'es_extended',

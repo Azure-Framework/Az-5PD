@@ -8966,7 +8966,11 @@ end
         tries = tries + 1
         local job = getJobSync(5000)
 
-        if job == nil then
+        if job == nil and Az5PD.Framework.ActiveKind() == 'standalone' then
+            if (tries % 10) == 1 then
+                print("[Az-5PD] Standalone mode is active but ACE access did not pass yet. Check add_ace/add_principal for az_5pd.open.")
+            end
+        elseif job == nil then
             if (tries % 10) == 1 then
                 print("[Az-FR | CALLOUT System] Waiting for framework job (join-in-progress)... attempt " .. tostring(tries))
             end

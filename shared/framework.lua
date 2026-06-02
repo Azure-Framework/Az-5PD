@@ -166,7 +166,8 @@ function Bridge.HasAce(src, key)
 end
 
 function Bridge.StandaloneEnabled()
-  return Config and Config.Standalone == true
+  local mode = cfg().mode
+  return (Config and Config.Standalone == true) or mode == 'standalone'
 end
 
 function Bridge.HasStandaloneAccess(src)
@@ -180,9 +181,13 @@ function Bridge.HasStandaloneAccess(src)
 end
 
 function Bridge.StandaloneJob(src)
-  if not Bridge.HasStandaloneAccess(src) then return nil end
+  if not Bridge.HasStandaloneAccess(src) then
+    dbg('standalone', 'fallback job denied because ACE failed', { source = src })
+    return nil
+  end
   local fallback = tostring((Config and Config.AcePermissions and Config.AcePermissions.fallbackJob) or 'leo')
   if fallback == '' then fallback = 'leo' end
+  dbg('standalone', 'fallback job granted', { source = src, job = fallback:lower() })
   return fallback:lower()
 end
 

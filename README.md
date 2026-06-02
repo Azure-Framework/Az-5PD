@@ -89,7 +89,6 @@ Standalone mode does not require a roleplay framework. Enable it and grant ACE p
 
 ```lua
 Config.Framework = 'standalone'
-Config.Standalone = true
 ```
 
 ## Framework Debugging
@@ -107,6 +106,9 @@ add_ace group.admin az_5pd.open allow
 add_ace group.admin az_5pd.supervisor allow
 add_ace group.admin az_5pd.dispatch allow
 add_ace group.admin az_5pd.admin allow
+
+# Only needed if your admin group is not already assigned by txAdmin or another permissions file:
+add_principal identifier.license:YOUR_LICENSE_HERE group.admin
 ```
 
 ## Optional Integration
