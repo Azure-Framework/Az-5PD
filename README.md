@@ -1,6 +1,6 @@
 # Az 5PD
 
-Az 5PD is a FiveM police simulation, MDT, callout, dispatch, and scene-tools resource for Az-Framework, QBCore, ESX, Gimic Core, and standalone ACE permission servers.
+Az 5PD is a FiveM police simulation, MDT, callout, dispatch, and scene-tools resource for Az-Framework, QBCore, ESX, Gimic Core, and standalone servers.
 
 [Framework Docs](https://madebyazure.com/framework/) | [Discord Support](https://discord.gg/tBg2U6CTHE)
 
@@ -83,12 +83,30 @@ QBCore servers can also use `job.type = 'leo'`. Set `Config.FrameworkRequireDuty
 
 Gimic Core uses `exports['gimicCore']:IsOnLEODuty(source)` and `GetPlayerDepartment(source)`.
 
-## Standalone ACE
+## Standalone Mode
 
-Standalone mode does not require a roleplay framework. Enable it and grant ACE permissions:
+Standalone mode does not require a roleplay framework or a player job. It now gives players the configured fallback police job and, by default, auto-duty access so the MDT, callouts, and police menu can start without waiting forever for framework job sync.
 
 ```lua
 Config.Framework = 'standalone'
+
+Config.Standalone = {
+  enabled = true,
+  requireAce = false,
+  defaultJob = 'leo',
+  autoDuty = true,
+  everyoneSupervisor = false
+}
+```
+
+Set `Config.Standalone.requireAce = true` only if you want to lock standalone access behind ACE permissions:
+
+```cfg
+add_ace group.admin az_5pd.open allow
+add_ace group.admin az_5pd.supervisor allow
+add_ace group.admin az_5pd.dispatch allow
+add_ace group.admin az_5pd.admin allow
+add_principal identifier.license:YOUR_LICENSE_HERE group.admin
 ```
 
 ## Framework Debugging
@@ -101,16 +119,6 @@ Config.FrameworkDebug = true
 
 When enabled, Az 5PD prints framework selection, resource state, job extraction, duty checks, allowed-job checks, supervisor checks, ACE permission checks, and reward routing.
 
-```cfg
-add_ace group.admin az_5pd.open allow
-add_ace group.admin az_5pd.supervisor allow
-add_ace group.admin az_5pd.dispatch allow
-add_ace group.admin az_5pd.admin allow
-
-# Only needed if your admin group is not already assigned by txAdmin or another permissions file:
-add_principal identifier.license:YOUR_LICENSE_HERE group.admin
-```
-
 ## Optional Integration
 
 - `Az-MDT`, `az_mdt`, or `Az-Mdt-Standalone` for MDT call sync.
@@ -122,7 +130,7 @@ add_principal identifier.license:YOUR_LICENSE_HERE group.admin
 
 - Citation rewards pay through QBCore, ESX, or Az-Framework money APIs when available.
 - Gimic Core duty and department data come from Gimic exports.
-- Standalone ACE mode handles access, but money rewards are skipped unless a framework money API is available.
+- Standalone mode can run plug-and-play without ACE. Money rewards are skipped unless a framework money API is available.
 
 ## Support
 

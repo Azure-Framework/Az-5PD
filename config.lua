@@ -11,6 +11,24 @@ Config.FrameworkResources = {
   az = 'Az-Framework'
 }
 
+local __az5pdStandaloneWasBoolean = Config.Standalone == true
+Config.Standalone = type(Config.Standalone) == 'table' and Config.Standalone or { enabled = __az5pdStandaloneWasBoolean or nil }
+do
+  local S = Config.Standalone
+
+  if S.enabled == nil then S.enabled = true end
+
+  -- false = standalone works without ACE/job frameworks. This is the plug-and-play mode.
+  -- true  = only players with the ACE permissions below can use Az-5PD.
+  if S.requireAce == nil then S.requireAce = false end
+
+  if S.defaultJob == nil then S.defaultJob = 'leo' end
+  if S.autoDuty == nil then S.autoDuty = true end
+
+  -- Keep this false unless you want every standalone player to have supervisor/admin-style access.
+  if S.everyoneSupervisor == nil then S.everyoneSupervisor = false end
+end
+
 Config.AcePermissions = Config.AcePermissions or {}
 do
   local A = Config.AcePermissions

@@ -2,6 +2,7 @@ Az5PD = Az5PD or {}
 Az5PD.Framework = Az5PD.Framework or {}
 
 local Bridge = Az5PD.Framework
+local extractName
 
 local function stringify(value, depth)
   depth = depth or 0
@@ -36,6 +37,49 @@ local function cfg()
     prefer = prefer,
     requireDuty = Config.FrameworkRequireDuty == true or legacy.requireDuty == true,
     debug = Config.FrameworkDebug == true or Config.DebugFramework == true
+  }
+end
+
+local function standaloneCfg()
+  Config = Config or {}
+  local raw = Config.Standalone
+  local s = type(raw) == 'table' and raw or {}
+  local c = cfg()
+
+  local enabled = s.enabled
+  if enabled == nil then enabled = s.Enable end
+  if enabled == nil then
+    if raw == true then
+      enabled = true
+    else
+      enabled = c.mode == 'standalone' or c.mode == 'auto'
+    end
+  elseif enabled == false and c.mode == 'standalone' then
+    enabled = true
+  end
+  if c.mode ~= 'auto' and c.mode ~= 'standalone' and raw ~= true and s.force ~= true then
+    enabled = false
+  end
+
+  local requireAce = s.requireAce
+  if requireAce == nil then requireAce = s.RequireAce end
+  if requireAce == nil then requireAce = false end
+
+  local autoDuty = s.autoDuty
+  if autoDuty == nil then autoDuty = s.AutoDuty end
+  if autoDuty == nil then autoDuty = true end
+
+  local fallbackJob = s.defaultJob or s.fallbackJob or s.job or (Config.AcePermissions and Config.AcePermissions.fallbackJob) or 'leo'
+  fallbackJob = extractName(fallbackJob) or 'leo'
+
+  local everyoneSupervisor = s.everyoneSupervisor == true or s.EveryoneSupervisor == true
+
+  return {
+    enabled = enabled == true,
+    requireAce = requireAce == true,
+    autoDuty = autoDuty == true,
+    fallbackJob = fallbackJob,
+    everyoneSupervisor = everyoneSupervisor
   }
 end
 
@@ -80,7 +124,7 @@ local function modeEnabled(kind)
   return mode == 'auto' or mode == kind
 end
 
-local function extractName(value)
+extractName = function(value)
   if value == nil then return nil end
   if type(value) == 'table' then
     local nested = value.name or value.job or value.id or value.label or value.department or value.dept or value.shortName or value.longName or value.code
@@ -166,8 +210,19 @@ function Bridge.HasAce(src, key)
 end
 
 function Bridge.StandaloneEnabled()
-  local mode = cfg().mode
-  return (Config and Config.Standalone == true) or mode == 'standalone'
+  return standaloneCfg().enabled == true
+end
+
+function Bridge.StandaloneRequiresAce()
+  return standaloneCfg().requireAce == true
+end
+
+function Bridge.StandaloneAutoDuty()
+  return standaloneCfg().autoDuty == true
+end
+
+function Bridge.StandaloneDefaultJob()
+  return standaloneCfg().fallbackJob or 'leo'
 end
 
 function Bridge.HasStandaloneAccess(src)
@@ -175,20 +230,27 @@ function Bridge.HasStandaloneAccess(src)
     dbg('standalone', 'standalone disabled', { source = src })
     return false
   end
+
+  local s = standaloneCfg()
+  if not s.requireAce then
+    dbg('standalone', 'standalone access allowed without ACE', { source = src, job = s.fallbackJob })
+    return true
+  end
+
   local allowed = Bridge.HasAce(src, 'open') or Bridge.HasAce(src, 'supervisor') or Bridge.HasAce(src, 'dispatch') or Bridge.HasAce(src, 'admin')
-  dbg('standalone', 'standalone access check', { source = src, allowed = allowed })
+  dbg('standalone', 'standalone ACE access check', { source = src, allowed = allowed })
   return allowed
 end
 
 function Bridge.StandaloneJob(src)
+  if not Bridge.StandaloneEnabled() then return nil end
   if not Bridge.HasStandaloneAccess(src) then
-    dbg('standalone', 'fallback job denied because ACE failed', { source = src })
+    dbg('standalone', 'fallback job denied because standalone access failed', { source = src })
     return nil
   end
-  local fallback = tostring((Config and Config.AcePermissions and Config.AcePermissions.fallbackJob) or 'leo')
-  if fallback == '' then fallback = 'leo' end
-  dbg('standalone', 'fallback job granted', { source = src, job = fallback:lower() })
-  return fallback:lower()
+  local fallback = Bridge.StandaloneDefaultJob()
+  dbg('standalone', 'fallback job granted', { source = src, job = fallback })
+  return fallback
 end
 
 local function callExport(resource, fn, ...)
@@ -341,17 +403,14 @@ end
 function Bridge.HasAccess(src)
   src = tonumber(src) or 0
   if src <= 0 then return false end
-  if Bridge.HasStandaloneAccess(src) then
-    dbg('access', 'allowed by standalone ACE', { source = src })
-    return true
-  end
   local kind = Bridge.ActiveKind()
   local allowed = false
   local job = nil
   if kind == 'gimic' then job, allowed = jobFromGimic(src)
   elseif kind == 'qb' then job, allowed = jobFromQb(src)
   elseif kind == 'esx' then job, allowed = jobFromEsx(src)
-  elseif kind == 'az' then job, allowed = jobFromAz(src) end
+  elseif kind == 'az' then job, allowed = jobFromAz(src)
+  elseif kind == 'standalone' then job, allowed = Bridge.StandaloneJob(src), Bridge.HasStandaloneAccess(src) end
   dbg('access', 'framework access result', { source = src, framework = kind or 'none', job = job, allowed = allowed == true })
   return allowed == true
 end
@@ -374,6 +433,10 @@ function Bridge.IsSupervisor(src)
       dbg('supervisor', 'allowed by Gimic group', { source = src })
       return true
     end
+  end
+  if Bridge.ActiveKind() == 'standalone' and standaloneCfg().everyoneSupervisor == true then
+    dbg('supervisor', 'allowed by standalone everyoneSupervisor', { source = src })
+    return true
   end
   local job = Bridge.GetPlayerJob(src)
   local allowed = Bridge.IsSupervisorJob(job)
@@ -419,7 +482,7 @@ end
 function Bridge.ClientJob()
   local state = localState()
   if state then
-    local job = extractName(state.department) or extractName(state.job) or extractName(state.PlayerData and state.PlayerData.job)
+    local job = extractName(state.az5pd_department) or extractName(state.department) or extractName(state.activeOrg) or extractName(state.job) or extractName(state.PlayerData and state.PlayerData.job)
     if job then
       dbg('client-job', 'statebag job found', { job = job })
       return job
@@ -448,19 +511,27 @@ function Bridge.ClientJob()
     local job = extractName(data and data.job)
     dbg('client-job', 'ESX client job', { job = job })
     return job
+  elseif kind == 'standalone' then
+    local job = Bridge.StandaloneDefaultJob()
+    dbg('client-job', 'standalone fallback job', { job = job })
+    return job
   end
   dbg('client-job', 'no client job found', { framework = kind or 'none' })
   return nil
 end
 
 function Bridge.ClientHasAccess()
+  local kind = Bridge.ActiveKind()
   local state = localState()
   if state and state.az5pd_hasAccess ~= nil then
+    if kind == 'standalone' and not Bridge.StandaloneRequiresAce() then
+      dbg('client-access', 'standalone client access allowed without ACE', { statebag = state.az5pd_hasAccess })
+      return true
+    end
     local allowed = state.az5pd_hasAccess == true
     dbg('client-access', 'statebag access', { allowed = allowed })
     return allowed
   end
-  local kind = Bridge.ActiveKind()
   if kind == 'gimic' then
     local ok, onDuty = callExport(resourceName('gimic'), 'IsOnLEODuty', serverId())
     if ok then
@@ -481,6 +552,10 @@ function Bridge.ClientHasAccess()
     local job = Bridge.ClientJob()
     local allowed = Bridge.IsAllowedJob(job)
     dbg('client-access', 'ESX client access', { job = job, allowed = allowed })
+    return allowed
+  elseif kind == 'standalone' then
+    local allowed = not Bridge.StandaloneRequiresAce()
+    dbg('client-access', 'standalone client access fallback', { requireAce = Bridge.StandaloneRequiresAce(), allowed = allowed })
     return allowed
   end
   local job = Bridge.ClientJob()

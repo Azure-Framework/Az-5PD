@@ -86,9 +86,15 @@ setPlayerUiAccessState = function(src)
     if not (ply and ply.state) then return end
     local job = getPlayerJobSafe(src)
     local hasAccess = Az5PD.Framework.HasAccess(src)
+    local kind = Az5PD.Framework.ActiveKind() or 'none'
     ply.state.az5pd_hasAccess = hasAccess == true
-    ply.state.az5pd_framework = Az5PD.Framework.ActiveKind() or 'none'
-    if hasAccess and (Az5PD.Framework.ActiveKind() == 'gimic' or (Az5PD.Framework.ActiveKind() == 'qb' and Az5PD.Framework.RequireDuty())) then
+    ply.state.az5pd_framework = kind
+    if hasAccess and kind == 'standalone' and Az5PD.Framework.StandaloneAutoDuty() then
+        leoDuty[src] = true
+        leoDutyDepartment[src] = job or Az5PD.Framework.StandaloneDefaultJob() or 'leo'
+        ply.state.az5pd_onDuty = true
+        ply.state.az5pd_department = leoDutyDepartment[src]
+    elseif hasAccess and (kind == 'gimic' or (kind == 'qb' and Az5PD.Framework.RequireDuty())) then
         ply.state.az5pd_onDuty = true
         ply.state.az5pd_department = job or ply.state.az5pd_department or 'police'
     elseif not hasAccess and leoDuty[src] ~= true then
@@ -408,7 +414,12 @@ local function setDutyStateInternal(src, desiredState, silent, selectedDepartmen
         TriggerClientEvent('az5pd:dutyNotify', src, 'error', 'You are not allowed to use Police duty.')
         return false
     end
-    desiredState = desiredState == true
+    if Az5PD.Framework.ActiveKind() == 'standalone' and Az5PD.Framework.StandaloneAutoDuty() then
+        desiredState = true
+        selectedDepartment = selectedDepartment or getPlayerJob(src) or Az5PD.Framework.StandaloneDefaultJob() or 'leo'
+    else
+        desiredState = desiredState == true
+    end
     leoDuty[src] = desiredState
     if desiredState then
         local chosen = tostring(selectedDepartment or leoDutyDepartment[src] or getPlayerJob(src) or 'police'):lower()

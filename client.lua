@@ -768,6 +768,9 @@ local function az5pdSetAuthorized(state)
 end
 
 local function az5pdIsOnDutyState()
+  if Az5PD.Framework.ActiveKind() == 'standalone' and Az5PD.Framework.StandaloneAutoDuty() then
+    return Az5PD.Framework.ClientHasAccess()
+  end
   local state = LocalPlayer and LocalPlayer.state or nil
   if state and state.az5pd_onDuty ~= nil then
     return state.az5pd_onDuty == true
