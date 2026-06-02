@@ -28,19 +28,38 @@ ensure Az-5PD
 
 ## Framework Modes
 
-`Config.Framework.mode = 'auto'` detects supported frameworks in this order:
+Set one clear framework value in `config.lua`:
 
 ```lua
-Config.Framework.prefer = { 'gimic', 'qb', 'esx', 'az', 'standalone' }
+Config.Framework = 'auto'
 ```
 
-Use a forced mode if your server runs multiple frameworks at once:
+Supported values:
 
 ```lua
-Config.Framework.mode = 'qb'
-Config.Framework.mode = 'esx'
-Config.Framework.mode = 'gimic'
-Config.Framework.mode = 'standalone'
+Config.Framework = 'auto'
+Config.Framework = 'az'
+Config.Framework = 'qb'
+Config.Framework = 'esx'
+Config.Framework = 'gimic'
+Config.Framework = 'standalone'
+```
+
+`auto` checks frameworks in this order:
+
+```lua
+Config.FrameworkPriority = { 'gimic', 'qb', 'esx', 'az', 'standalone' }
+```
+
+If your resource names are custom, change them here:
+
+```lua
+Config.FrameworkResources = {
+  gimic = 'gimicCore',
+  qb = 'qb-core',
+  esx = 'es_extended',
+  az = 'Az-Framework'
+}
 ```
 
 ## Job Access
@@ -60,7 +79,7 @@ Config.Jobs.allowed = {
 }
 ```
 
-QBCore servers can also use `job.type = 'leo'`. Set `Config.Framework.requireDuty = true` if you want QBCore `job.onduty` to be required.
+QBCore servers can also use `job.type = 'leo'`. Set `Config.FrameworkRequireDuty = true` if you want QBCore `job.onduty` to be required.
 
 Gimic Core uses `exports['gimicCore']:IsOnLEODuty(source)` and `GetPlayerDepartment(source)`.
 
@@ -69,9 +88,19 @@ Gimic Core uses `exports['gimicCore']:IsOnLEODuty(source)` and `GetPlayerDepartm
 Standalone mode does not require a roleplay framework. Enable it and grant ACE permissions:
 
 ```lua
-Config.Framework.mode = 'standalone'
+Config.Framework = 'standalone'
 Config.Standalone = true
 ```
+
+## Framework Debugging
+
+Turn on framework debug when access, duty, or ACE checks are not behaving how you expect:
+
+```lua
+Config.FrameworkDebug = true
+```
+
+When enabled, Az 5PD prints framework selection, resource state, job extraction, duty checks, allowed-job checks, supervisor checks, ACE permission checks, and reward routing.
 
 ```cfg
 add_ace group.admin az_5pd.open allow

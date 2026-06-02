@@ -88,7 +88,7 @@ setPlayerUiAccessState = function(src)
     local hasAccess = Az5PD.Framework.HasAccess(src)
     ply.state.az5pd_hasAccess = hasAccess == true
     ply.state.az5pd_framework = Az5PD.Framework.ActiveKind() or 'none'
-    if hasAccess and (Az5PD.Framework.ActiveKind() == 'gimic' or (Az5PD.Framework.ActiveKind() == 'qb' and (((Config or {}).Framework or {}).requireDuty == true))) then
+    if hasAccess and (Az5PD.Framework.ActiveKind() == 'gimic' or (Az5PD.Framework.ActiveKind() == 'qb' and Az5PD.Framework.RequireDuty())) then
         ply.state.az5pd_onDuty = true
         ply.state.az5pd_department = job or ply.state.az5pd_department or 'police'
     elseif not hasAccess and leoDuty[src] ~= true then
@@ -1700,7 +1700,7 @@ RegisterNetEvent('gimicCore:server:playerDutyChanged', function(src) refreshPlay
 RegisterNetEvent('gimicCore:playerDutyChanged', function(src) refreshPlayerAccess(src or source) end)
 AddEventHandler('playerJoining', function() refreshPlayerAccess(source) end)
 AddEventHandler('onResourceStart', function(resourceName)
-    local resources = ((Config or {}).Framework or {}).resources or {}
+    local resources = Az5PD.Framework.ResourceNames()
     if resourceName ~= resources.qb and resourceName ~= resources.esx and resourceName ~= resources.gimic and resourceName ~= resources.az then return end
     SetTimeout(1000, function()
         for _, playerId in ipairs(GetPlayers() or {}) do

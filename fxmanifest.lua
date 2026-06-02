@@ -2,7 +2,7 @@ fx_version 'cerulean'
 games { 'gta5' }
 
 author 'Azure'
-version '2.1.0'
+version '2.1.1'
 
 ui_page 'ui/index.html'
 
